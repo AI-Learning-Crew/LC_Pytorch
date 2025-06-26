@@ -129,6 +129,12 @@ def main():
     parser.add_argument('--target_sr', type=int, default=16000,
                        help='오디오 샘플링 레이트 (기본값: 16000)')
     
+    # 파일 매칭 설정
+    parser.add_argument('--skip_file_matching', action='store_true',
+                       help='파일 매칭 과정을 건너뜁니다 (이미 매칭된 파일 목록이 있는 경우)')
+    parser.add_argument('--matched_files_path', type=str, default=None,
+                       help='이미 매칭된 파일 목록이 저장된 경로 (JSON 파일)')
+    
     args = parser.parse_args()
     
     # 디렉토리 확인
@@ -147,10 +153,29 @@ def main():
     # 데이터 변환기 생성
     image_transform, processor = create_data_transforms()
     
-    # 파일 매칭
-    print("파일 매칭 중...")
-    matched_files = match_face_voice_files(args.image_folder, args.audio_folder)
-    print(f"총 {len(matched_files)}개의 매칭된 파일 쌍을 찾았습니다.")
+    # 파일 매칭 (선택적)
+    if args.skip_file_matching:
+        if args.matched_files_path and os.path.exists(args.matched_files_path):
+            import json
+            print(f"저장된 파일 매칭 결과를 불러오는 중: {args.matched_files_path}")
+            with open(args.matched_files_path, 'r', encoding='utf-8') as f:
+                matched_files = json.load(f)
+            print(f"총 {len(matched_files)}개의 매칭된 파일 쌍을 불러왔습니다.")
+        else:
+            print("오류: --skip_file_matching이 설정되었지만 유효한 --matched_files_path가 제공되지 않았습니다.")
+            return 1
+    else:
+        print("파일 매칭 중...")
+        matched_files = match_face_voice_files(args.image_folder, args.audio_folder)
+        print(f"총 {len(matched_files)}개의 매칭된 파일 쌍을 찾았습니다.")
+        
+        # 매칭 결과 저장 (선택적)
+        if args.matched_files_path:
+            import json
+            os.makedirs(os.path.dirname(args.matched_files_path), exist_ok=True)
+            with open(args.matched_files_path, 'w', encoding='utf-8') as f:
+                json.dump(matched_files, f, ensure_ascii=False, indent=2)
+            print(f"파일 매칭 결과가 '{args.matched_files_path}'에 저장되었습니다.")
     
     if len(matched_files) == 0:
         print("매칭된 파일이 없습니다. 경로를 확인해주세요.")

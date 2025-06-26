@@ -99,14 +99,20 @@ def create_data_transforms():
     Returns:
         이미지 변환기, 오디오 프로세서
     """
-    # 이미지 변환기
+    # 이미지 변환기 설정
     image_transform = transforms.Compose([
+        # 이미지를 224x224 크기로 리사이즈 (표준 CNN 입력 크기)
         transforms.Resize((224, 224)),
+        # PIL 이미지를 PyTorch 텐서로 변환 (0-1 범위의 float32)
         transforms.ToTensor(),
+        # ImageNet 데이터셋의 평균과 표준편차로 정규화
+        # RGB 채널별로 정규화하여 모델 학습 안정성 향상
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
-    # 오디오 프로세서
+    # Wav2Vec2 오디오 프로세서 초기화
+    # facebook/wav2vec2-base-960h: 960시간의 LibriSpeech로 사전 훈련된 모델
+    # 오디오를 모델이 이해할 수 있는 형태로 변환
     processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
     
     return image_transform, processor

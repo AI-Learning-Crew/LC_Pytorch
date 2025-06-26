@@ -84,14 +84,20 @@ class FaceVoiceModel(nn.Module):
 
 
 class InfoNCELoss(nn.Module):
-    """InfoNCE 손실 함수"""
+    """InfoNCE 손실 함수
+    
+    InfoNCE (Info Noise Contrastive Estimation)는 대조 학습에서 사용되는 손실 함수입니다.
+    서로 다른 모달리티(이미지-음성) 간의 임베딩을 학습하여 
+    같은 샘플의 임베딩은 가깝게, 다른 샘플의 임베딩은 멀게 만듭니다.
+    """
     
     def __init__(self, temperature: float = 0.07):
         """
         InfoNCELoss 초기화
         
         Args:
-            temperature: 온도 파라미터
+            temperature: 온도 파라미터 (0.07이 일반적으로 사용됨)
+                        낮을수록 더 확실한 예측을, 높을수록 더 부드러운 예측을 유도
         """
         super(InfoNCELoss, self).__init__()
         self.temperature = temperature
@@ -105,23 +111,29 @@ class InfoNCELoss(nn.Module):
             audio_embeddings: 오디오 임베딩 (batch_size, embedding_dim)
             
         Returns:
-            InfoNCE 손실 값
+            InfoNCE 손실 값 (스칼라 텐서)
         """
         batch_size = image_embeddings.size(0)
         
-        # 유사도 행렬 계산
+        # 유사도 행렬 계산: 각 이미지와 각 오디오 간의 코사인 유사도
+        # 결과: (batch_size, batch_size) 행렬
+        # similarity_matrix[i][j] = 이미지 i와 오디오 j 간의 유사도
         similarity_matrix = torch.matmul(image_embeddings, audio_embeddings.T) / self.temperature
         
-        # 정답 라벨 (대각선)
+        # 정답 라벨 생성: 대각선 요소들이 정답 (i번째 이미지와 i번째 오디오가 매칭)
+        # torch.arange(batch_size)는 [0, 1, 2, ..., batch_size-1] 생성
         labels = torch.arange(batch_size, device=image_embeddings.device)
         
-        # 이미지->오디오 손실
+        # 이미지->오디오 방향 손실: 각 이미지가 올바른 오디오를 찾도록 학습
+        # cross_entropy는 similarity_matrix의 각 행을 확률 분포로 취급하여 손실 계산
         image_to_audio_loss = F.cross_entropy(similarity_matrix, labels)
         
-        # 오디오->이미지 손실
+        # 오디오->이미지 방향 손실: 각 오디오가 올바른 이미지를 찾도록 학습
+        # similarity_matrix.T는 전치 행렬로, 각 오디오를 기준으로 계산
         audio_to_image_loss = F.cross_entropy(similarity_matrix.T, labels)
         
-        # 평균 손실
+        # 양방향 손실의 평균을 최종 손실로 사용
+        # 이는 이미지->오디오와 오디오->이미지 매칭을 모두 학습하기 위함
         total_loss = (image_to_audio_loss + audio_to_image_loss) / 2
         
         return total_loss

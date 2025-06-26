@@ -1,3 +1,7 @@
+"""
+모델 패키지
+"""
+
 from .model_setup import *
 from .encoder_decoder import EncoderDecoder
 
@@ -17,3 +21,7 @@ from .discriminators import CondPatchDiscriminator
 
 # Facenet for Perceptual Loss and Evaluation
 from .inception_resnet_v1 import InceptionResnetV1, fixed_image_standardization
+
+from .face_voice_model import FaceVoiceModel, InfoNCELoss, save_model_components, load_model_components
+
+__all__ = ['FaceVoiceModel', 'InfoNCELoss', 'save_model_components', 'load_model_components']

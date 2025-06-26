@@ -227,10 +227,6 @@ top1_accuracy, auc_score = evaluate_summary_metrics(model, dataloader, device)
 4. **CUDA 메모리 부족**: GPU 메모리 부족 시 발생
    - 해결책: 배치 크기 줄이기, 그래디언트 누적 사용
 
-## 라이선스
-
-이 프로젝트는 MIT 라이선스 하에 배포됩니다.
-
 ## 기여
 
 버그 리포트, 기능 요청, 풀 리퀘스트를 환영합니다.

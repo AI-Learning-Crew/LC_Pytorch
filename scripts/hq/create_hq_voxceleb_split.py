@@ -34,13 +34,14 @@ def find_data_directories(base_dir, possible_names):
     return None
 
 
-def create_voxceleb_split(vox_dir, output_json=None):
+def create_voxceleb_split(vox_dir, output_json=None, max_identities=None):
     """
     VoxCeleb 데이터셋의 train/test/val 분할을 생성합니다.
     
     Args:
         vox_dir (str): VoxCeleb 데이터가 저장된 디렉토리 경로
         output_json (str): 출력 JSON 파일 경로 (기본값: vox_dir/split.json)
+        max_identities (int): 각 데이터셋에서 처리할 최대 identity 개수 (기본값: None, 모든 데이터 처리)
     
     Returns:
         dict: 분할 정보가 담긴 딕셔너리
@@ -97,15 +98,23 @@ def create_voxceleb_split(vox_dir, output_json=None):
     )
     
     if vox1_mel_dir:
-        vox1_mel_available = set(os.listdir(vox1_mel_dir))
-        print(f"VoxCeleb1 {vox1_mel_dir.name} 디렉토리에서 {len(vox1_mel_available)}개 identity 발견")
+        vox1_mel_list = os.listdir(vox1_mel_dir)
+        if max_identities and len(vox1_mel_list) > max_identities:
+            vox1_mel_list = sorted(vox1_mel_list)[:max_identities]
+            print(f"VoxCeleb1 mel 데이터를 {max_identities}개로 제한합니다.")
+        vox1_mel_available = set(vox1_mel_list)
+        print(f"VoxCeleb1 {vox1_mel_dir.name} 디렉토리에서 {len(vox1_mel_available)}개 identity 처리")
         print(f"  예시: {list(vox1_mel_available)[:5]}")
     else:
         print("VoxCeleb1 mel_spectrograms 디렉토리를 찾을 수 없습니다.")
     
     if vox1_face_dir:
-        vox1_face_available = set(os.listdir(vox1_face_dir))
-        print(f"VoxCeleb1 {vox1_face_dir.name} 디렉토리에서 {len(vox1_face_available)}개 identity 발견")
+        vox1_face_list = os.listdir(vox1_face_dir)
+        if max_identities and len(vox1_face_list) > max_identities:
+            vox1_face_list = sorted(vox1_face_list)[:max_identities]
+            print(f"VoxCeleb1 face 데이터를 {max_identities}개로 제한합니다.")
+        vox1_face_available = set(vox1_face_list)
+        print(f"VoxCeleb1 {vox1_face_dir.name} 디렉토리에서 {len(vox1_face_available)}개 identity 처리")
         print(f"  예시: {list(vox1_face_available)[:5]}")
     else:
         print("VoxCeleb1 masked_faces 디렉토리를 찾을 수 없습니다.")
@@ -121,15 +130,23 @@ def create_voxceleb_split(vox_dir, output_json=None):
     )
     
     if vox2_mel_dir:
-        vox2_mel_available = set(os.listdir(vox2_mel_dir))
-        print(f"VoxCeleb2 {vox2_mel_dir.name} 디렉토리에서 {len(vox2_mel_available)}개 identity 발견")
+        vox2_mel_list = os.listdir(vox2_mel_dir)
+        if max_identities and len(vox2_mel_list) > max_identities:
+            vox2_mel_list = sorted(vox2_mel_list)[:max_identities]
+            print(f"VoxCeleb2 mel 데이터를 {max_identities}개로 제한합니다.")
+        vox2_mel_available = set(vox2_mel_list)
+        print(f"VoxCeleb2 {vox2_mel_dir.name} 디렉토리에서 {len(vox2_mel_available)}개 identity 처리")
         print(f"  예시: {list(vox2_mel_available)[:5]}")
     else:
         print("VoxCeleb2 mel_spectrograms 디렉토리를 찾을 수 없습니다.")
     
     if vox2_face_dir:
-        vox2_face_available = set(os.listdir(vox2_face_dir))
-        print(f"VoxCeleb2 {vox2_face_dir.name} 디렉토리에서 {len(vox2_face_available)}개 identity 발견")
+        vox2_face_list = os.listdir(vox2_face_dir)
+        if max_identities and len(vox2_face_list) > max_identities:
+            vox2_face_list = sorted(vox2_face_list)[:max_identities]
+            print(f"VoxCeleb2 face 데이터를 {max_identities}개로 제한합니다.")
+        vox2_face_available = set(vox2_face_list)
+        print(f"VoxCeleb2 {vox2_face_dir.name} 디렉토리에서 {len(vox2_face_available)}개 identity 처리")
         print(f"  예시: {list(vox2_face_available)[:5]}")
     else:
         print("VoxCeleb2 masked_faces 디렉토리를 찾을 수 없습니다.")
@@ -177,6 +194,12 @@ def create_voxceleb_split(vox_dir, output_json=None):
     print(f"  Val:   {len(split_dict['vox2']['val'])}")
     print(f"  Test:  {len(split_dict['vox2']['test'])}")
     
+    # max_identities가 설정된 경우 파일명에 표시
+    if max_identities:
+        output_json = Path(output_json)
+        output_json = output_json.parent / f"{output_json.stem}_max{max_identities}{output_json.suffix}"
+        print(f"\n제한된 데이터셋이므로 파일명을 {output_json.name}로 변경합니다.")
+    
     # JSON 파일로 저장
     with open(output_json, 'w', encoding='utf-8') as outfile:
         json.dump(split_dict, outfile, indent=2, ensure_ascii=False)
@@ -202,6 +225,12 @@ def main():
         default=None,
         help='출력 JSON 파일 경로 (기본값: vox_dir/split.json)'
     )
+    parser.add_argument(
+        '--max_identities',
+        type=int,
+        default=None,
+        help='각 데이터셋에서 처리할 최대 identity 개수 (빠른 테스트용, 예: 100)'
+    )
     
     args = parser.parse_args()
     
@@ -210,8 +239,16 @@ def main():
         print(f"Error: {args.vox_dir} 디렉토리가 존재하지 않습니다.")
         return 1
     
+    # max_identities 값 검증
+    if args.max_identities is not None and args.max_identities <= 0:
+        print(f"Error: --max_identities는 양수여야 합니다. 입력값: {args.max_identities}")
+        return 1
+    
     try:
-        split_dict = create_voxceleb_split(args.vox_dir, args.output_json)
+        if args.max_identities:
+            print(f"간략화 모드: 각 데이터셋에서 최대 {args.max_identities}개 identity만 처리합니다.")
+        
+        split_dict = create_voxceleb_split(args.vox_dir, args.output_json, args.max_identities)
         print("\n분할 생성이 완료되었습니다!")
         return 0
     except Exception as e:

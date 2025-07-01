@@ -194,11 +194,9 @@ def create_voxceleb_split(vox_dir, output_json=None, max_identities=None):
     print(f"  Val:   {len(split_dict['vox2']['val'])}")
     print(f"  Test:  {len(split_dict['vox2']['test'])}")
     
-    # max_identities가 설정된 경우 파일명에 표시
+    # max_identities가 설정된 경우 안내 메시지 출력
     if max_identities:
-        output_json = Path(output_json)
-        output_json = output_json.parent / f"{output_json.stem}_max{max_identities}{output_json.suffix}"
-        print(f"\n제한된 데이터셋이므로 파일명을 {output_json.name}로 변경합니다.")
+        print(f"\n간략화 모드: 각 데이터셋에서 최대 {max_identities}개 identity만 처리합니다.")
     
     # JSON 파일로 저장
     with open(output_json, 'w', encoding='utf-8') as outfile:

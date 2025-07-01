@@ -87,7 +87,7 @@ python scripts/evaluate_face_voice.py \
 #### 데이터 분할 생성
 
 ```bash
-python scripts/create_hq_voxceleb_split.py \
+python scripts/hq/create_hq_voxceleb_split.py \
     --vox_dir ./data/HQVoxCeleb \
     --output_json ./data/HQVoxCeleb/split.json
 ```

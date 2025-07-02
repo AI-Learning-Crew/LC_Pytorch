@@ -7,6 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import Wav2Vec2Model
 from torchvision.models import vit_b_16
+from torchvision import transforms
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+import numpy as np
 
 
 class HQVoxCelebModel(nn.Module):
@@ -35,8 +38,12 @@ class HQVoxCelebModel(nn.Module):
         
         # 투영층
         self.face_projection = nn.Sequential(
-            nn.Linear(face_feature_dim, embedding_dim),
+            nn.Linear(face_feature_dim, embedding_dim * 2),
             nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(embedding_dim, embedding_dim)
         )
         
@@ -193,4 +200,83 @@ def load_hq_voxceleb_model_components(model, save_dir):
     if os.path.exists(audio_projection_path):
         model.audio_projection.load_state_dict(torch.load(audio_projection_path))
     
-    print(f"모델 컴포넌트들이 {save_dir}에서 로드되었습니다.") 
+    print(f"모델 컴포넌트들이 {save_dir}에서 로드되었습니다.")
+
+
+def _get_image_transform(self):
+    """개선된 이미지 변환기"""
+    if self.split_type == 'train':
+        # 학습용: 데이터 증강 적용
+        return transforms.Compose([
+            transforms.Resize((self.image_size + 32, self.image_size + 32)),
+            transforms.RandomCrop((self.image_size, self.image_size)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
+    else:
+        # 검증/테스트용: 기본 변환만 적용
+        return transforms.Compose([
+            transforms.Resize((self.image_size, self.image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
+
+# 옵티마이저 설정 후 추가
+optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+
+# 코사인 어닐링 스케줄러
+scheduler = CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=1e-6)
+
+# 또는 검증 손실 기반 스케줄러
+# scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, 
+#                               patience=5, verbose=True) 
+
+class EarlyStopping:
+    def __init__(self, patience=7, min_delta=0, restore_best_weights=True):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.best_loss = None
+        self.counter = 0
+        self.best_weights = None
+
+    def __call__(self, val_loss, model):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+            self.save_checkpoint(model)
+        elif val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            self.save_checkpoint(model)
+        else:
+            self.counter += 1
+
+        if self.counter >= self.patience:
+            if self.restore_best_weights:
+                model.load_state_dict(self.best_weights)
+            return True
+        return False
+
+    def save_checkpoint(self, model):
+        self.best_weights = model.state_dict().copy() 
+
+# 역전파 후 추가
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+optimizer.step() 
+
+def mixup_data(x, y, alpha=1.0):
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam 

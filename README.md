@@ -221,37 +221,14 @@ data/HQVoxCeleb/
 └── split.json               # train/val/test 분할 정보
 ```
 
-### 프로젝트 구조
+### 📁 주요 디렉토리별 기능
 
-```
-LC_PyTorch/
-├── data/
-│   └── HQVoxCeleb/          # HQ VoxCeleb 데이터셋
-│       ├── hq_voxceleb_dataset.py
-│       ├── __init__.py
-│       ├── split.json
-│       ├── vox1/
-│       └── vox2/
-├── models/
-│   ├── hq/                  # HQ 모델들
-│   │   ├── hq_voxceleb_model.py
-│   │   └── __init__.py
-│   ├── face_voice_model.py
-│   └── __init__.py
-├── scripts/
-│   ├── hq/                  # HQ 스크립트들
-│   │   ├── train_hq_voxceleb.py
-│   │   └── __init__.py
-│   ├── train_face_voice.py
-│   └── evaluate_face_voice.py
-├── datasets/
-│   ├── face_voice_dataset.py
-│   └── __init__.py
-└── utils/
-    ├── evaluator.py
-    ├── face_extractor.py
-    └── face_deduplicator.py
-```
+- **`data/`**: VoxCeleb 등 특정 데이터셋을 위한 전용 모듈들을 포함합니다.
+- **`datasets/`**: 범용적으로 사용할 수 있는 PyTorch 데이터셋 클래스들을 정의합니다.
+- **`models/`**: 얼굴-음성 매칭을 위한 딥러닝 모델 아키텍처들을 구현합니다.
+- **`scripts/`**: 전체 워크플로우를 실행할 수 있는 메인 스크립트들이 위치합니다.
+- **`utils/`**: 얼굴 처리, 평가, 시각화 등의 공통 기능들을 제공합니다.
+- **`examples/`**: 프로젝트 사용법을 보여주는 예제 코드들을 포함합니다.
 
 ### 모델 저장 구조
 
@@ -304,53 +281,6 @@ saved_models/
 - **Top-5 Accuracy**: 상위 5개 내에 정답이 포함되는 비율
 - **Top-10 Accuracy**: 상위 10개 내에 정답이 포함되는 비율
 - **ROC-AUC Score**: 이진 분류 성능
-
-## 예제
-
-### 기본 사용법
-
-```python
-from models.face_voice_model import FaceVoiceModel
-from datasets.face_voice_dataset import FaceVoiceDataset, create_data_transforms
-from utils.evaluator import evaluate_summary_metrics
-
-# 모델 생성
-model = FaceVoiceModel(embedding_dim=512)
-
-# 데이터 준비
-image_transform, processor = create_data_transforms()
-dataset = FaceVoiceDataset(file_pairs, processor, image_transform)
-
-# 평가
-top1_accuracy, auc_score = evaluate_summary_metrics(model, dataloader, device)
-```
-
-### HQ VoxCeleb 사용법
-
-```python
-from models.hq.hq_voxceleb_model import HQVoxCelebModel
-from data.HQVoxCeleb.hq_voxceleb_dataset import create_hq_voxceleb_dataloaders
-
-# 데이터로더 생성
-dataloaders = create_hq_voxceleb_dataloaders(
-    split_json_path='./data/HQVoxCeleb/split.json',
-    dataset_type='vox2',
-    batch_size=16
-)
-
-# 모델 생성
-model = HQVoxCelebModel(embedding_dim=512, pretrained=True)
-
-# 학습
-for batch in dataloaders['train']:
-    mels = batch['mel']
-    faces = batch['face']
-    identities = batch['identity']
-    face_embeddings, audio_embeddings = model(mels, faces)
-    # 손실 계산 및 역전파...
-```
-
-자세한 예제는 `examples/` 디렉토리를 참조하세요.
 
 ## 성능 최적화 팁
 

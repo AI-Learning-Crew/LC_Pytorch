@@ -225,15 +225,6 @@ def _get_image_transform(self):
                                std=[0.229, 0.224, 0.225])
         ])
 
-# 옵티마이저 설정 후 추가
-optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-
-# 코사인 어닐링 스케줄러
-scheduler = CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=1e-6)
-
-# 또는 검증 손실 기반 스케줄러
-# scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, 
-#                               patience=5, verbose=True) 
 
 class EarlyStopping:
     def __init__(self, patience=7, min_delta=0, restore_best_weights=True):
@@ -262,11 +253,8 @@ class EarlyStopping:
         return False
 
     def save_checkpoint(self, model):
-        self.best_weights = model.state_dict().copy() 
+        self.best_weights = model.state_dict().copy()
 
-# 역전파 후 추가
-torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-optimizer.step() 
 
 def mixup_data(x, y, alpha=1.0):
     if alpha > 0:
@@ -279,4 +267,24 @@ def mixup_data(x, y, alpha=1.0):
 
     mixed_x = lam * x + (1 - lam) * x[index, :]
     y_a, y_b = y, y[index]
-    return mixed_x, y_a, y_b, lam 
+    return mixed_x, y_a, y_b, lam
+
+
+def create_optimizer_and_scheduler(model, args):
+    """옵티마이저와 스케줄러를 생성합니다."""
+    # 옵티마이저 설정
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    
+    # 코사인 어닐링 스케줄러
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=1e-6)
+    
+    # 또는 검증 손실 기반 스케줄러
+    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, 
+    #                               patience=5, verbose=True)
+    
+    return optimizer, scheduler
+
+
+def apply_gradient_clipping(model, max_norm=1.0):
+    """그래디언트 클리핑을 적용합니다."""
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm) 

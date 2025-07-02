@@ -75,15 +75,21 @@ class HQVoxCelebModel(nn.Module):
         # mel spectrogram을 1D로 평탄화하여 오디오 특성으로 사용
         audio_features = mel_spectrograms.view(batch_size, -1)
         
-        # 동적으로 투영층 생성
+        # 음성 투영층 동적 생성 - mel spectrogram의 크기가 가변적이므로 런타임에 투영층을 생성
         if self.audio_projection is None or self.audio_input_dim != audio_features.shape[1]:
+            # 현재 batch의 audio_features 차원을 저장 (mel spectrogram을 평탄화한 크기)
             self.audio_input_dim = audio_features.shape[1]
             print(f"음성 투영층 생성: {self.audio_input_dim} -> {self.embedding_dim}")
+            
+            # 2층 신경망으로 구성된 투영층 생성:
+            # 1. 첫 번째 Linear: 가변 크기의 mel spectrogram 특성을 embedding_dim으로 압축
+            # 2. ReLU: 비선형 활성화 함수로 표현력 증가  
+            # 3. 두 번째 Linear: embedding_dim을 유지하면서 더 나은 특성 추출
             self.audio_projection = nn.Sequential(
-                nn.Linear(self.audio_input_dim, self.embedding_dim),
-                nn.ReLU(),
-                nn.Linear(self.embedding_dim, self.embedding_dim)
-            ).to(audio_features.device)
+                nn.Linear(self.audio_input_dim, self.embedding_dim),  # 입력 차원을 임베딩 차원으로 변환
+                nn.ReLU(),                                            # 비선형성 추가
+                nn.Linear(self.embedding_dim, self.embedding_dim)     # 임베딩 공간에서의 정제
+            ).to(audio_features.device)  # 현재 텐서와 같은 디바이스(CPU/GPU)로 투영층 이동
         
         # Wav2Vec2 인코더 통과 (실제로는 mel spectrogram을 직접 처리)
         # 여기서는 mel spectrogram을 직접 투영층에 통과시킴

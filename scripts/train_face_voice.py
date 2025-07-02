@@ -10,7 +10,7 @@ from pathlib import Path
 
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent.parent
-sys.path.append(str(project_root))
+sys.path.insert(0, str(project_root))
 
 import torch
 import torch.nn as nn
@@ -18,10 +18,18 @@ from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from tqdm.auto import tqdm
 
-from models.face_voice_model import FaceVoiceModel, InfoNCELoss, save_model_components
-from datasets.face_voice_dataset import (
-    FaceVoiceDataset, collate_fn, create_data_transforms, match_face_voice_files
-)
+try:
+    from models.face_voice_model import FaceVoiceModel, InfoNCELoss, save_model_components
+    from datasets.face_voice_dataset import (
+        FaceVoiceDataset, collate_fn, create_data_transforms, match_face_voice_files
+    )
+except ImportError as e:
+    print(f"모듈 import 오류: {e}")
+    print(f"현재 Python 경로: {sys.path}")
+    print(f"프로젝트 루트: {project_root}")
+    print("프로젝트 루트에서 스크립트를 실행해주세요:")
+    print(f"python scripts/train_face_voice.py [인자들]")
+    sys.exit(1)
 
 
 def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, 

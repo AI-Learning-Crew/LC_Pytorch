@@ -195,6 +195,72 @@ drive.mount('/content/drive')
 - `--weight_decay`: 가중치 감쇠 (기본값: 1e-4)
 - `--save_interval`: 모델 저장 간격 (에포크, 기본값: 5)
 
+### 5. create_matched_file.py 사용법
+
+이 스크립트는 주어진 데이터셋 디렉토리와 메타 정보(JSON 파일)를 기반으로,  
+각 인덱스별로 얼굴 이미지와 음성 파일 쌍을 매칭하여 저장합니다.
+
+---
+
+#### ✅ 실행 방법
+
+```bash
+python scripts/create_matched_file.py \
+  -d <데이터셋_디렉토리> \
+  -m <메타데이터_JSON_파일> \
+  -o <결과_출력_디렉토리> \
+  -l <매칭_할_최대_인덱스_수>
+```
+
+---
+
+#### ✅ 인자 설명
+
+| 인자 | 필수 | 설명 |
+|------|------|------|
+| `-d`, `--dataset_path` | ✅ | 얼굴 이미지 및 음성 파일이 있는 루트 디렉토리 경로 |
+| `-m`, `--meta_path` | ✅ | 메타 정보가 포함된 JSON 파일 경로 (`id_list` 추출용) |
+| `-o`, `--output` | ✅ | 결과 `.txt` 파일이 저장될 디렉토리 |
+| `-l`, `--limit` | ✅ | 인덱스별로 매칭할 최대 횟수 (예: 100이면 `matched_files-0.txt` ~ `matched_files-99.txt`) |
+
+---
+
+#### ✅ 예시
+
+```bash
+python scripts/create_matched_file.py \
+  -d data/voxceleb2/VoxCeleb2/train \
+  -m data/voxceleb2/VoxCeleb2/voxceleb2-dev.json \
+  -o data/output \
+  -l 100
+```
+
+위 명령은 ID별로 0번째부터 99번째까지 총 100쌍을 추출하여,  
+`data/output/matched_files-0.txt`, ..., `matched_files-99.txt` 형태로 저장합니다.
+
+---
+
+#### 📝 출력 포맷
+
+각 출력 파일 (`matched_files-*.txt`)은 다음과 같은 형식으로 저장됩니다:
+
+```
+<face_image_path>    <voice_file_path>
+```
+
+예시:
+```
+data/train/id001/faces/0001/frame_0005.jpg	data/train/id001/voices/0001.wav
+```
+
+---
+
+## 🚨 주의사항
+
+- 출력 디렉토리는 미리 생성되어 있어야 합니다 (`-o` 경로).
+- JSON 파일의 최상위 key들은 ID 리스트여야 합니다 (`dict` 구조).
+- `limit` 값보다 각 ID의 face/voice 수가 적을 경우 해당 인덱스는 건너뜁니다.
+
 ## 데이터 구조
 
 ### 일반 데이터셋 출력 구조

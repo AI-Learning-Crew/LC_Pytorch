@@ -38,31 +38,35 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
     total_loss = 0.0
     num_batches = len(train_dataloader)
     
-    # 진행률 표시 간격 조정 (빠른 업데이트)
-    train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]', 
-                      leave=False, ncols=100)
+    train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
     
     for batch_idx, batch in enumerate(train_pbar):
-        mels = batch['mel'].to(device, non_blocking=True)  # non_blocking=True로 속도 향상
-        faces = batch['face'].to(device, non_blocking=True)
+        # 배치 데이터를 지정된 장치로 이동
+        mels = batch['mel'].to(device, non_blocking=True)      # non_blocking=True로 메모리 전송 최적화
+        faces = batch['face'].to(device, non_blocking=True)    # non_blocking=True로 메모리 전송 최적화
+        identities = batch['identity']
         
         # 순전파
         face_embeddings, audio_embeddings = model(mels, faces)
+        
+        # 손실 계산
         loss = criterion(face_embeddings, audio_embeddings)
         
         # 역전파
-        optimizer.zero_grad(set_to_none=True)  # 메모리 효율성 향상
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
+        # 손실 누적 및 진행률 업데이트
         total_loss += loss.item()
+        train_pbar.set_postfix({
+            'loss': f'{loss.item():.4f}',
+            'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
+        })
         
-        # 진행률 업데이트 (간격 조정)
-        if batch_idx % 10 == 0:  # 10배치마다 업데이트
-            train_pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
-            })
+        # 메모리 정리 (매 10배치마다)
+        if batch_idx % 10 == 0 and device.type == 'cuda':
+            torch.cuda.empty_cache()
     
     avg_loss = total_loss / num_batches
     return avg_loss
@@ -75,26 +79,34 @@ def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epo
     num_batches = len(val_dataloader)
     
     if num_batches == 0:
+        print(f"검증 데이터가 없습니다. 검증을 건너뜁니다.")
         return float('inf')
     
     with torch.no_grad():
-        val_pbar = tqdm(val_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]', 
-                       leave=False, ncols=100)
+        val_pbar = tqdm(val_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]')
         
         for batch_idx, batch in enumerate(val_pbar):
-            mels = batch['mel'].to(device, non_blocking=True)
-            faces = batch['face'].to(device, non_blocking=True)
+            # 배치 데이터를 지정된 장치로 이동
+            mels = batch['mel'].to(device, non_blocking=True)      # non_blocking=True로 메모리 전송 최적화
+            faces = batch['face'].to(device, non_blocking=True)    # non_blocking=True로 메모리 전송 최적화
+            identities = batch['identity']
             
+            # 순전파
             face_embeddings, audio_embeddings = model(mels, faces)
+            
+            # 손실 계산
             loss = criterion(face_embeddings, audio_embeddings)
             
+            # 손실 누적 및 진행률 업데이트
             total_loss += loss.item()
+            val_pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
+            })
             
-            if batch_idx % 5 == 0:  # 5배치마다 업데이트
-                val_pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
-                })
+            # 메모리 정리 (매 5배치마다)
+            if batch_idx % 5 == 0 and device.type == 'cuda':
+                torch.cuda.empty_cache()
     
     avg_loss = total_loss / num_batches
     return avg_loss
@@ -171,24 +183,24 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 고속 학습 설정
-    parser.add_argument('--batch_size', type=int, default=128,  # 큰 배치 크기
-                       help='배치 크기 (기본값: 128)')
-    parser.add_argument('--num_epochs', type=int, default=30,
-                       help='학습 에포크 수')
-    parser.add_argument('--learning_rate', type=float, default=2e-4,  # 높은 학습률
-                       help='학습률')
+    parser.add_argument('--batch_size', type=int, default=8,  # 64 -> 8로 대폭 감소
+                       help='배치 크기 (기본값: 8)')
+    parser.add_argument('--num_epochs', type=int, default=50,
+                       help='학습 에포크 수 (기본값: 50)')
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                       help='학습률 (기본값: 1e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
-                       help='가중치 감쇠')
-    parser.add_argument('--num_workers', type=int, default=16,  # 많은 워커
-                       help='데이터 로딩 워커 수')
+                       help='가중치 감쇠 (기본값: 1e-4)')
+    parser.add_argument('--num_workers', type=int, default=2,  # 8 -> 2로 감소
+                       help='데이터 로딩 워커 수 (기본값: 2)')
     
     # 오디오 설정 (단축)
-    parser.add_argument('--audio_duration_sec', type=int, default=2,  # 짧은 오디오
-                       help='오디오 길이 (초)')
+    parser.add_argument('--audio_duration_sec', type=int, default=2,  # 3 -> 2로 감소
+                       help='오디오 길이 (초) (기본값: 2)')
     parser.add_argument('--target_sr', type=int, default=16000,
-                       help='오디오 샘플링 레이트')
+                       help='오디오 샘플링 레이트 (기본값: 16000)')
     parser.add_argument('--image_size', type=int, default=224,
-                       help='이미지 크기')
+                       help='이미지 크기 (기본값: 224)')
     
     # 장치 설정
     parser.add_argument('--device', type=str, default='auto',
@@ -201,17 +213,30 @@ def main():
     
     args = parser.parse_args()
     
-    # 장치 설정
+    # ===== 장치 설정 =====
     if args.force_cpu or args.device == 'cpu':
         device = torch.device('cpu')
     elif args.device == 'cuda':
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
+    else:  # auto
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     print(f"사용 장치: {device}")
+    
+    # GPU 메모리 최적화 설정
     if device.type == 'cuda':
-        print(f"GPU 메모리: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB")
+        # GPU 메모리 캐시 정리
+        torch.cuda.empty_cache()
+        
+        # 메모리 할당 전략 설정
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+        
+        # GPU 메모리 정보 출력
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"GPU 메모리: {gpu_memory:.1f}GB")
+        
+        # 메모리 사용량 모니터링 활성화
+        torch.cuda.memory.set_per_process_memory_fraction(0.8)  # GPU 메모리의 80%만 사용
     
     # 데이터 파일 검증
     if not os.path.exists(args.split_json_path):

@@ -32,12 +32,16 @@ class HQVoxCelebModel(nn.Module):
         self.face_encoder.heads = nn.Identity()
         # 그래디언트 체크포인팅 비활성화 (속도 향상)
         self.face_encoder.gradient_checkpointing = False
+        # 메모리 최적화: mixed precision 지원
+        self.face_encoder.half = lambda: self.face_encoder
         face_feature_dim = 768  # ViT-Base의 출력 차원
         
         # 음성 인코더 (Wav2Vec2-Base)
         self.audio_encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base")
         # 그래디언트 체크포인팅 비활성화 (속도 향상)
         self.audio_encoder.gradient_checkpointing = False
+        # 메모리 최적화: mixed precision 지원
+        self.audio_encoder.half = lambda: self.audio_encoder
         audio_feature_dim = 768  # Wav2Vec2-Base의 출력 차원
         
         # 투영층

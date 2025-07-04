@@ -257,8 +257,8 @@ class HQVoxCelebDataset(Dataset):
 
 
 def create_hq_voxceleb_dataloaders(split_json_path, 
-                                  batch_size=32, num_workers=4,
-                                  audio_duration_sec=5, target_sr=16000, 
+                                  batch_size=64, num_workers=8,
+                                  audio_duration_sec=3, target_sr=16000, 
                                   image_size=224):
     """
     HQ VoxCeleb 데이터셋의 train/val/test 데이터로더를 생성합니다.
@@ -292,7 +292,9 @@ def create_hq_voxceleb_dataloaders(split_json_path,
             batch_size=batch_size,
             shuffle=(split_type == 'train'),
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2
         )
     
     return dataloaders

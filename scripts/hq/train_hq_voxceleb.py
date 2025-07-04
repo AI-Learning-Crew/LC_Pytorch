@@ -360,20 +360,20 @@ def main():
                        help='사전 훈련된 모델 사용 (기본값: True)')
     
     # ===== 학습 설정 관련 인자 =====
-    parser.add_argument('--batch_size', type=int, default=16,
-                       help='배치 크기 (기본값: 16)')
+    parser.add_argument('--batch_size', type=int, default=64,
+                       help='배치 크기 (기본값: 64)')
     parser.add_argument('--num_epochs', type=int, default=50,
                        help='학습 에포크 수 (기본값: 50)')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
                        help='학습률 (기본값: 1e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                        help='가중치 감쇠 (기본값: 1e-4)')
-    parser.add_argument('--num_workers', type=int, default=2,
-                       help='데이터 로딩 워커 수 (기본값: 2)')
+    parser.add_argument('--num_workers', type=int, default=8,
+                       help='데이터 로딩 워커 수 (기본값: 8)')
     
     # ===== 오디오 설정 관련 인자 =====
-    parser.add_argument('--audio_duration_sec', type=int, default=5,
-                       help='오디오 길이 (초) (기본값: 5)')
+    parser.add_argument('--audio_duration_sec', type=int, default=3,
+                       help='오디오 길이 (초) (기본값: 3)')
     parser.add_argument('--target_sr', type=int, default=16000,
                        help='오디오 샘플링 레이트 (기본값: 16000)')
     parser.add_argument('--image_size', type=int, default=224,

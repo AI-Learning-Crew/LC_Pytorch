@@ -23,9 +23,16 @@ import multiprocessing as mp
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # TensorFlow 경고 숨김
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'   # GPU 0만 사용
 
+# CUDA 경고 숨김
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+
 # 멀티프로세싱 시작 방법 설정
 if __name__ == '__main__':
-    mp.set_start_method('spawn', force=True)
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # 이미 설정된 경우 무시
 
 # 프로젝트 루트 경로 설정
 project_root = Path(__file__).parent.parent.parent
@@ -263,8 +270,8 @@ def main():
                        help='학습률 (기본값: 1e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                        help='가중치 감쇠 (기본값: 1e-4)')
-    parser.add_argument('--num_workers', type=int, default=0,
-                       help='데이터 로딩 워커 수 (0=메인 프로세스, 기본값: 0)')
+    parser.add_argument('--num_workers', type=int, default=1,
+                       help='데이터 로딩 워커 수 (0=메인 프로세스, 기본값: 1)')
     parser.add_argument('--prefetch_factor', type=int, default=2,
                        help='워커당 미리 로드할 배치 수 (기본값: 2)')
     parser.add_argument('--cache_size', type=int, default=2000,
@@ -319,17 +326,17 @@ def main():
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
         print(f"GPU 메모리: {gpu_memory:.1f}GB")
         
-        # 메모리 사용량 모니터링 활성화 (성능 최적화)
-        torch.cuda.memory.set_per_process_memory_fraction(0.9)  # GPU 메모리의 90% 사용
-        
         # 성능 최적화 설정
         torch.backends.cudnn.benchmark = True  # 성능 향상을 위해 True로 설정
         torch.backends.cudnn.deterministic = False  # 성능 향상을 위해 False로 설정
         torch.backends.cuda.matmul.allow_tf32 = True  # TF32 활성화 (속도 향상)
         torch.backends.cudnn.allow_tf32 = True  # cuDNN TF32 활성화
         
-        # 메모리 할당 최적화
-        torch.cuda.set_per_process_memory_fraction(0.95)  # GPU 메모리의 95% 사용
+        # 메모리 할당 최적화 (멀티프로세싱 고려)
+        torch.cuda.set_per_process_memory_fraction(0.85)  # GPU 메모리의 85% 사용 (안전 마진)
+        
+        # CUDA 스트림 최적화
+        torch.cuda.synchronize()  # 초기 동기화
         
         print("GPU 성능 최적화 설정 완료")
     

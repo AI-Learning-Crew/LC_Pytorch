@@ -19,6 +19,10 @@ import pickle
 from typing import Dict, List, Tuple, Any
 import time
 
+# 멀티프로세싱에서 CUDA 경고 방지
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+
 
 class HQVoxCelebDataset(Dataset):
     """
@@ -379,6 +383,7 @@ def create_hq_voxceleb_dataloaders(split_json_path,
                 'pin_memory': pin_memory and torch.cuda.is_available(),
                 'timeout': 120,  # 타임아웃 증가
                 'multiprocessing_context': 'spawn',
+                'generator': torch.Generator(device='cpu'),  # CPU 생성기 사용
             })
         else:
             # 단일 프로세스 모드 (안정성 우선)

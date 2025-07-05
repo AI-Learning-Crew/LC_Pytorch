@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HQ VoxCeleb 데이터셋을 위한 고속 학습 스크립트
+HQ VoxCeleb 데이터셋을 위한 고속 학습 스크립트 (병렬 처리 최적화)
 
 학습 속도 최적화 버전:
 - 큰 배치 크기 (64-128)
@@ -17,6 +17,11 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import multiprocessing as mp
+
+# 멀티프로세싱 시작 방법 설정
+if __name__ == '__main__':
+    mp.set_start_method('spawn', force=True)
 
 # 프로젝트 루트 경로 설정
 project_root = Path(__file__).parent.parent.parent
@@ -29,12 +34,18 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm.auto import tqdm
 import json
 import time
+import threading
 
 from models.hq.hq_voxceleb_model import (
     HQVoxCelebModel, HQVoxCelebInfoNCELoss, save_hq_voxceleb_model_components
 )
-from data.HQVoxCeleb.hq_voxceleb_dataset import create_hq_voxceleb_dataloaders
+from data.HQVoxCeleb.hq_voxceleb_dataset import create_hq_voxceleb_dataloaders_parallel
 
+# 시스템 최적화 설정
+os.environ['OMP_NUM_THREADS'] = '4'
+os.environ['MKL_NUM_THREADS'] = '4'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 
 def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoch, num_epochs, grad_clip_norm=1.0):
     """고속 학습을 위한 에포크 함수"""
@@ -204,7 +215,7 @@ def train_model_fast(model, train_dataloader, val_dataloader, criterion, optimiz
 
 
 def main():
-    parser = argparse.ArgumentParser(description='HQ VoxCeleb 고속 학습')
+    parser = argparse.ArgumentParser(description='HQ VoxCeleb 고속 학습 (병렬 처리 최적화)')
     
     # 데이터 경로
     parser.add_argument('--split_json_path', type=str, 
@@ -219,25 +230,21 @@ def main():
     parser.add_argument('--temperature', type=float, default=0.07,
                        help='InfoNCE 온도 파라미터')
     
-    # 고속 학습 설정
-    parser.add_argument('--batch_size', type=int, default=16,
-                       help='배치 크기 (기본값: 16)')
+    # 병렬 처리 최적화 설정
+    parser.add_argument('--batch_size', type=int, default=32,  # 16 -> 32로 증가
+                       help='배치 크기 (기본값: 32)')
     parser.add_argument('--num_epochs', type=int, default=50,
                        help='학습 에포크 수 (기본값: 50)')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
                        help='학습률 (기본값: 1e-4)')
-    parser.add_argument('--weight_decay', type=float, default=5e-4,  # 1e-4 -> 5e-4로 증가
+    parser.add_argument('--weight_decay', type=float, default=5e-4,
                        help='가중치 감쇠 (기본값: 5e-4)')
-    parser.add_argument('--num_workers', type=int, default=8,
-                       help='데이터 로딩 워커 수 (기본값: 8)')
-    
-    # 데이터로더 최적화 설정 추가
-    parser.add_argument('--prefetch_factor', type=int, default=4,
-                       help='각 워커당 미리 준비할 배치 수 (기본값: 4)')
-    parser.add_argument('--pin_memory', action='store_true', default=True,
-                       help='GPU 메모리 고정 활성화')
-    parser.add_argument('--persistent_workers', action='store_true', default=True,
-                       help='워커 재사용 활성화')
+    parser.add_argument('--num_workers', type=int, default=16,  # 8 -> 16으로 증가
+                       help='데이터 로딩 워커 수 (기본값: 16)')
+    parser.add_argument('--prefetch_factor', type=int, default=8,  # 4 -> 8로 증가
+                       help='워커당 미리 로드할 배치 수 (기본값: 8)')
+    parser.add_argument('--cache_size', type=int, default=3000,  # 캐시 크기 증가
+                       help='데이터 캐시 크기 (기본값: 3000)')
     
     # 정규화 설정
     parser.add_argument('--patience', type=int, default=5,
@@ -245,7 +252,7 @@ def main():
     parser.add_argument('--grad_clip_norm', type=float, default=1.0,
                        help='그래디언트 클리핑 노름 (기본값: 1.0)')
     
-    # 오디오 설정 (단축)
+    # 오디오 설정
     parser.add_argument('--audio_duration_sec', type=int, default=2,
                        help='오디오 길이 (초) (기본값: 2)')
     parser.add_argument('--target_sr', type=int, default=16000,
@@ -294,9 +301,9 @@ def main():
         print(f"오류: split.json 파일이 존재하지 않습니다: {args.split_json_path}")
         return 1
     
-    # 데이터로더 생성
-    print("데이터로더 생성 중...")
-    dataloaders = create_hq_voxceleb_dataloaders(
+    # 병렬 처리 최적화된 데이터로더 생성
+    print("병렬 처리 최적화된 데이터로더 생성 중...")
+    dataloaders = create_hq_voxceleb_dataloaders_parallel(
         split_json_path=args.split_json_path,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -304,8 +311,9 @@ def main():
         target_sr=args.target_sr,
         image_size=args.image_size,
         prefetch_factor=args.prefetch_factor,
-        pin_memory=args.pin_memory,
-        persistent_workers=args.persistent_workers
+        pin_memory=True,
+        persistent_workers=True,
+        cache_size=args.cache_size
     )
     
     train_dataloader = dataloaders['train']

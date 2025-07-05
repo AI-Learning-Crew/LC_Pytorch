@@ -8,6 +8,9 @@ HQ VoxCeleb 데이터셋을 위한 고속 학습 스크립트
 - 짧은 오디오 길이 (3초)
 - 그래디언트 체크포인팅 비활성화
 - 메모리 최적화
+- 조기 종료 (Early Stopping) 추가
+- 학습률 스케줄러 추가
+- 그래디언트 클리핑 추가
 """
 
 import argparse
@@ -22,6 +25,7 @@ sys.path.insert(0, str(project_root))
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm.auto import tqdm
 import json
 import time
@@ -32,7 +36,7 @@ from models.hq.hq_voxceleb_model import (
 from data.HQVoxCeleb.hq_voxceleb_dataset import create_hq_voxceleb_dataloaders
 
 
-def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoch, num_epochs):
+def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoch, num_epochs, grad_clip_norm=1.0):
     """고속 학습을 위한 에포크 함수"""
     model.train()
     total_loss = 0.0
@@ -55,6 +59,11 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
         # 역전파
         optimizer.zero_grad()
         loss.backward()
+        
+        # 그래디언트 클리핑 (오버피팅 방지)
+        if grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+        
         optimizer.step()
         
         # 손실 누적 및 진행률 업데이트
@@ -113,25 +122,42 @@ def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epo
 
 
 def train_model_fast(model, train_dataloader, val_dataloader, criterion, optimizer, 
-                    device, num_epochs, save_dir, save_interval=10):
-    """고속 학습 관리 함수"""
-    history = {'train_loss': [], 'val_loss': []}
+                    device, num_epochs, save_dir, save_interval=10, patience=5, grad_clip_norm=1.0):
+    """고속 학습 관리 함수 (조기 종료 및 학습률 스케줄러 포함)"""
+    history = {'train_loss': [], 'val_loss': [], 'lr': []}
     best_val_loss = float('inf')
     has_validation = len(val_dataloader) > 0
+    patience_counter = 0
+    
+    # 학습률 스케줄러 설정
+    scheduler = ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3, 
+        verbose=True, min_lr=1e-6
+    )
     
     print(f"총 배치 수: 학습={len(train_dataloader)}, 검증={len(val_dataloader)}")
+    print(f"조기 종료 patience: {patience}")
     
     for epoch in range(num_epochs):
         start_time = time.time()
         
+        # 현재 학습률 기록
+        current_lr = optimizer.param_groups[0]['lr']
+        history['lr'].append(current_lr)
+        
         # 학습
-        train_loss = train_epoch_fast(model, train_dataloader, criterion, optimizer, 
-                                     device, epoch, num_epochs)
+        train_loss = train_epoch_fast(
+            model, train_dataloader, criterion, optimizer, 
+            device, epoch, num_epochs, grad_clip_norm
+        )
         
         # 검증
         if has_validation:
             val_loss = validate_epoch_fast(model, val_dataloader, criterion, 
                                           device, epoch, num_epochs)
+            
+            # 학습률 스케줄러 업데이트
+            scheduler.step(val_loss)
         else:
             val_loss = float('inf')
         
@@ -144,25 +170,36 @@ def train_model_fast(model, train_dataloader, val_dataloader, criterion, optimiz
         # 결과 출력
         if has_validation:
             print(f'Epoch {epoch+1}/{num_epochs} ({epoch_time:.1f}s): '
-                  f'Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+                  f'Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, '
+                  f'LR: {current_lr:.2e}')
         else:
             print(f'Epoch {epoch+1}/{num_epochs} ({epoch_time:.1f}s): '
-                  f'Train Loss: {train_loss:.4f}')
+                  f'Train Loss: {train_loss:.4f}, LR: {current_lr:.2e}')
+        
+        # 조기 종료 및 최고 성능 모델 저장
+        if has_validation:
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                best_model_path = os.path.join(save_dir, 'best_model.pth')
+                torch.save(model.state_dict(), best_model_path)
+                print(f'새로운 최고 성능 모델 저장 (Val Loss: {val_loss:.4f})')
+            else:
+                patience_counter += 1
+                print(f'검증 성능 개선 없음 ({patience_counter}/{patience})')
+                
+                if patience_counter >= patience:
+                    print(f'조기 종료: {patience} 에포크 동안 검증 성능 개선 없음')
+                    break
         
         # 모델 저장
         if (epoch + 1) % save_interval == 0:
             save_hq_voxceleb_model_components(model, save_dir)
             print(f'모델 저장 완료 (에포크 {epoch+1})')
-        
-        # 최고 성능 모델 저장
-        if has_validation and val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model_path = os.path.join(save_dir, 'best_model.pth')
-            torch.save(model.state_dict(), best_model_path)
-            print(f'새로운 최고 성능 모델 저장 (Val Loss: {val_loss:.4f})')
     
     # 최종 모델 저장
     save_hq_voxceleb_model_components(model, save_dir)
+    print(f'최종 모델 저장 완료 (총 {epoch+1} 에포크)')
     return history
 
 
@@ -183,19 +220,25 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 고속 학습 설정
-    parser.add_argument('--batch_size', type=int, default=8,  # 64 -> 8로 대폭 감소
+    parser.add_argument('--batch_size', type=int, default=8,
                        help='배치 크기 (기본값: 8)')
     parser.add_argument('--num_epochs', type=int, default=50,
                        help='학습 에포크 수 (기본값: 50)')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
                        help='학습률 (기본값: 1e-4)')
-    parser.add_argument('--weight_decay', type=float, default=1e-4,
-                       help='가중치 감쇠 (기본값: 1e-4)')
-    parser.add_argument('--num_workers', type=int, default=2,  # 8 -> 2로 감소
+    parser.add_argument('--weight_decay', type=float, default=5e-4,  # 1e-4 -> 5e-4로 증가
+                       help='가중치 감쇠 (기본값: 5e-4)')
+    parser.add_argument('--num_workers', type=int, default=2,
                        help='데이터 로딩 워커 수 (기본값: 2)')
     
+    # 정규화 설정
+    parser.add_argument('--patience', type=int, default=5,
+                       help='조기 종료 patience (기본값: 5)')
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0,
+                       help='그래디언트 클리핑 노름 (기본값: 1.0)')
+    
     # 오디오 설정 (단축)
-    parser.add_argument('--audio_duration_sec', type=int, default=2,  # 3 -> 2로 감소
+    parser.add_argument('--audio_duration_sec', type=int, default=2,
                        help='오디오 길이 (초) (기본값: 2)')
     parser.add_argument('--target_sr', type=int, default=16000,
                        help='오디오 샘플링 레이트 (기본값: 16000)')
@@ -293,7 +336,9 @@ def main():
         'audio_duration_sec': args.audio_duration_sec,
         'target_sr': args.target_sr,
         'image_size': args.image_size,
-        'device': str(device)
+        'device': str(device),
+        'patience': args.patience,
+        'grad_clip_norm': args.grad_clip_norm
     }
     
     with open(os.path.join(args.save_dir, 'config.json'), 'w', encoding='utf-8') as f:
@@ -306,7 +351,8 @@ def main():
     history = train_model_fast(
         model, train_dataloader, val_dataloader,
         criterion, optimizer, device,
-        args.num_epochs, args.save_dir, args.save_interval
+        args.num_epochs, args.save_dir, args.save_interval,
+        args.patience, args.grad_clip_norm
     )
     
     total_time = time.time() - start_time

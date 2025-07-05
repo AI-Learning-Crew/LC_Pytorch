@@ -220,16 +220,24 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 고속 학습 설정
-    parser.add_argument('--batch_size', type=int, default=8,
-                       help='배치 크기 (기본값: 8)')
+    parser.add_argument('--batch_size', type=int, default=16,
+                       help='배치 크기 (기본값: 16)')
     parser.add_argument('--num_epochs', type=int, default=50,
                        help='학습 에포크 수 (기본값: 50)')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
                        help='학습률 (기본값: 1e-4)')
     parser.add_argument('--weight_decay', type=float, default=5e-4,  # 1e-4 -> 5e-4로 증가
                        help='가중치 감쇠 (기본값: 5e-4)')
-    parser.add_argument('--num_workers', type=int, default=2,
-                       help='데이터 로딩 워커 수 (기본값: 2)')
+    parser.add_argument('--num_workers', type=int, default=8,
+                       help='데이터 로딩 워커 수 (기본값: 8)')
+    
+    # 데이터로더 최적화 설정 추가
+    parser.add_argument('--prefetch_factor', type=int, default=4,
+                       help='각 워커당 미리 준비할 배치 수 (기본값: 4)')
+    parser.add_argument('--pin_memory', action='store_true', default=True,
+                       help='GPU 메모리 고정 활성화')
+    parser.add_argument('--persistent_workers', action='store_true', default=True,
+                       help='워커 재사용 활성화')
     
     # 정규화 설정
     parser.add_argument('--patience', type=int, default=5,
@@ -294,7 +302,10 @@ def main():
         num_workers=args.num_workers,
         audio_duration_sec=args.audio_duration_sec,
         target_sr=args.target_sr,
-        image_size=args.image_size
+        image_size=args.image_size,
+        prefetch_factor=args.prefetch_factor,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers
     )
     
     train_dataloader = dataloaders['train']

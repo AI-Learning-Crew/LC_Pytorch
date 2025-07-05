@@ -259,20 +259,10 @@ class HQVoxCelebDataset(Dataset):
 def create_hq_voxceleb_dataloaders(split_json_path, 
                                   batch_size=64, num_workers=8,
                                   audio_duration_sec=3, target_sr=16000, 
-                                  image_size=224):
+                                  image_size=224, prefetch_factor=4,
+                                  pin_memory=True, persistent_workers=True):
     """
     HQ VoxCeleb 데이터셋의 train/val/test 데이터로더를 생성합니다.
-    
-    Args:
-        split_json_path (str): split.json 파일 경로
-        batch_size (int): 배치 크기
-        num_workers (int): 데이터 로딩 워커 수
-        audio_duration_sec (int): 오디오 길이 (초)
-        target_sr (int): 오디오 샘플링 레이트
-        image_size (int): 이미지 크기
-    
-    Returns:
-        dict: train, val, test 데이터로더가 포함된 딕셔너리
     """
     from torch.utils.data import DataLoader
     
@@ -287,14 +277,17 @@ def create_hq_voxceleb_dataloaders(split_json_path,
             image_size=image_size
         )
         
+        # 최적화된 데이터로더 설정
         dataloaders[split_type] = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=(split_type == 'train'),
             num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=2
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers and num_workers > 0,
+            prefetch_factor=prefetch_factor if num_workers > 0 else 2,
+            drop_last=True,  # 배치 크기 일관성 보장
+            multiprocessing_context='spawn' if num_workers > 0 else None,  # 멀티프로세싱 최적화
         )
     
     return dataloaders

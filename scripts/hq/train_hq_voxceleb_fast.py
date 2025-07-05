@@ -104,8 +104,8 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
                 'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
             })
             
-            # 메모리 정리 (매 500배치마다 - 성능 향상을 위해 빈도 감소)
-            if batch_idx % 500 == 0 and device.type == 'cuda':
+            # 메모리 정리 (매 50배치마다 - 메모리 부족 방지)
+            if batch_idx % 50 == 0 and device.type == 'cuda':
                 torch.cuda.empty_cache()
                 
         except Exception as e:
@@ -151,8 +151,8 @@ def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epo
                     'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
                 })
                 
-                # 메모리 정리 (매 200배치마다 - 성능 향상을 위해 빈도 감소)
-                if batch_idx % 200 == 0 and device.type == 'cuda':
+                # 메모리 정리 (매 20배치마다 - 메모리 부족 방지)
+                if batch_idx % 20 == 0 and device.type == 'cuda':
                     torch.cuda.empty_cache()
                     
             except Exception as e:
@@ -262,8 +262,8 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=128,
-                       help='배치 크기 (기본값: 128)')
+    parser.add_argument('--batch_size', type=int, default=32,
+                       help='배치 크기 (기본값: 32)')
     parser.add_argument('--num_epochs', type=int, default=10,
                        help='학습 에포크 수 (기본값: 10)')
     parser.add_argument('--learning_rate', type=float, default=2e-4,
@@ -274,8 +274,8 @@ def main():
                        help='데이터 로딩 워커 수 (0=메인 프로세스, 기본값: 0)')
     parser.add_argument('--prefetch_factor', type=int, default=2,
                        help='워커당 미리 로드할 배치 수 (기본값: 2)')
-    parser.add_argument('--cache_size', type=int, default=3000,
-                       help='데이터 캐시 크기 (기본값: 3000)')
+    parser.add_argument('--cache_size', type=int, default=1000,
+                       help='데이터 캐시 크기 (기본값: 1000)')
     parser.add_argument('--enable_parallel', action='store_true', default=True,
                        help='병렬 처리 활성화')
     
@@ -332,14 +332,14 @@ def main():
         torch.backends.cuda.matmul.allow_tf32 = True  # TF32 활성화 (속도 향상)
         torch.backends.cudnn.allow_tf32 = True  # cuDNN TF32 활성화
         
-        # 메모리 할당 최적화 (단일 프로세스 고성능 모드)
-        torch.cuda.set_per_process_memory_fraction(0.98)  # GPU 메모리의 98% 사용 (단일 프로세스)
+        # 메모리 할당 최적화 (안전 모드)
+        torch.cuda.set_per_process_memory_fraction(0.8)  # GPU 메모리의 80% 사용 (안전 마진)
         
         # CUDA 스트림 최적화
         torch.cuda.synchronize()  # 초기 동기화
         
-        # 메모리 할당 전략 최적화 (단일 프로세스)
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:512'
+        # 메모리 할당 전략 최적화 (안전 모드)
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
         
         print("GPU 성능 최적화 설정 완료")
     
@@ -406,10 +406,11 @@ def main():
     )
     model.to(device)
     
-    # 모델 성능 최적화
-    if device.type == 'cuda':
-        model = torch.compile(model)  # PyTorch 2.0 컴파일 최적화
-        print("모델 컴파일 완료 (PyTorch 2.0 최적화)")
+    # 모델 성능 최적화 (메모리 절약을 위해 컴파일 비활성화)
+    # if device.type == 'cuda':
+    #     model = torch.compile(model)  # PyTorch 2.0 컴파일 최적화
+    #     print("모델 컴파일 완료 (PyTorch 2.0 최적화)")
+    print("모델 컴파일 비활성화 (메모리 절약)")
     
     # 모델을 장치로 이동
     model.to(device)

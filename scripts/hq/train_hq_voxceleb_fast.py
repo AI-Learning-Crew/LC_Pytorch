@@ -380,10 +380,11 @@ def main():
     # 모델 초기화
     print("모델 초기화 중...")
     mel_time_steps = args.audio_duration_sec * 100  # 실제 데이터 차원에 맞춤
+    mel_freq_bins = 40  # 실제 데이터에서 확인된 주파수 빈 수
     model = HQVoxCelebModel(
         embedding_dim=args.embedding_dim,
         pretrained=True,
-        mel_freq_bins=80,  # mel spectrogram 주파수 빈 수
+        mel_freq_bins=mel_freq_bins,  # 실제 데이터 차원에 맞춤
         mel_time_steps=mel_time_steps  # 실제 데이터 차원에 맞춤
     )
     model.to(device)
@@ -392,6 +393,30 @@ def main():
     if device.type == 'cuda':
         model = torch.compile(model)  # PyTorch 2.0 컴파일 최적화
         print("모델 컴파일 완료 (PyTorch 2.0 최적화)")
+    
+    # 모델을 장치로 이동
+    model.to(device)
+    
+    # 모델 테스트 (디버깅용)
+    print("모델 테스트 중...")
+    try:
+        test_mel = test_batch['mel'].to(device)
+        test_face = test_batch['face'].to(device)
+        
+        with torch.no_grad():
+            face_emb, audio_emb = model(test_mel, test_face)
+            print(f"모델 테스트 성공: face_emb shape={face_emb.shape}, audio_emb shape={audio_emb.shape}")
+            
+            # 손실 계산 테스트
+            test_criterion = HQVoxCelebInfoNCELoss(temperature=args.temperature)
+            test_loss = test_criterion(face_emb, audio_emb)
+            print(f"테스트 손실: {test_loss.item():.4f}")
+            
+    except Exception as e:
+        print(f"모델 테스트 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
     
     # 손실 함수 및 옵티마이저
     criterion = HQVoxCelebInfoNCELoss(temperature=args.temperature)

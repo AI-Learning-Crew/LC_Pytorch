@@ -39,7 +39,8 @@ from tqdm.auto import tqdm
 import json
 import time
 import threading
-from torch.cuda.amp import autocast, GradScaler
+# Mixed Precision Training 비활성화로 인해 import 제거
+# from torch.amp import autocast, GradScaler
 
 from models.hq.hq_voxceleb_model import (
     HQVoxCelebModel, HQVoxCelebInfoNCELoss, save_hq_voxceleb_model_components
@@ -59,7 +60,8 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
     num_batches = len(train_dataloader)
     
     # Mixed Precision Training을 위한 GradScaler (수정된 버전)
-    scaler = GradScaler('cuda') if device.type == 'cuda' else None
+    # 안정성을 위해 Mixed Precision 비활성화
+    scaler = None
     
     train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
     
@@ -70,38 +72,22 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
             faces = batch['face'].to(device, non_blocking=True)    # non_blocking=True로 메모리 전송 최적화
             identities = batch['identity']
             
-            # Mixed Precision Training
-            if scaler is not None:
-                with autocast():
-                    # 순전파
-                    face_embeddings, audio_embeddings = model(mels, faces)
-                    
-                    # 손실 계산
-                    loss = criterion(face_embeddings, audio_embeddings)
-                
-                # 역전파
-                optimizer.zero_grad()
-                scaler.scale(loss).backward()
-                
-                # 그래디언트 클리핑 (오버피팅 방지)
-                if grad_clip_norm > 0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-                
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                # CPU 학습
-                face_embeddings, audio_embeddings = model(mels, faces)
-                loss = criterion(face_embeddings, audio_embeddings)
-                
-                optimizer.zero_grad()
-                loss.backward()
-                
-                if grad_clip_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-                
-                optimizer.step()
+            # 안정성을 위해 Mixed Precision 비활성화
+            # 순전파
+            face_embeddings, audio_embeddings = model(mels, faces)
+            
+            # 손실 계산
+            loss = criterion(face_embeddings, audio_embeddings)
+            
+            # 역전파
+            optimizer.zero_grad()
+            loss.backward()
+            
+            # 그래디언트 클리핑 (오버피팅 방지)
+            if grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            
+            optimizer.step()
             
             # 손실 누적 및 진행률 업데이트
             total_loss += loss.item()
@@ -142,18 +128,12 @@ def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epo
                 faces = batch['face'].to(device, non_blocking=True)    # non_blocking=True로 메모리 전송 최적화
                 identities = batch['identity']
                 
-                # Mixed Precision Training
-                if device.type == 'cuda':
-                    with autocast():
-                        # 순전파
-                        face_embeddings, audio_embeddings = model(mels, faces)
-                        
-                        # 손실 계산
-                        loss = criterion(face_embeddings, audio_embeddings)
-                else:
-                    # CPU 검증
-                    face_embeddings, audio_embeddings = model(mels, faces)
-                    loss = criterion(face_embeddings, audio_embeddings)
+                # 안정성을 위해 Mixed Precision 비활성화
+                # 순전파
+                face_embeddings, audio_embeddings = model(mels, faces)
+                
+                # 손실 계산
+                loss = criterion(face_embeddings, audio_embeddings)
                 
                 # 손실 누적 및 진행률 업데이트
                 total_loss += loss.item()

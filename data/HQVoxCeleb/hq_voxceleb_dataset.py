@@ -328,7 +328,7 @@ def create_hq_voxceleb_dataloaders(split_json_path,
     
     # 시스템 최적화 설정
     if enable_parallel:
-        torch.set_num_threads(1)  # 스레드 수 최소화
+        torch.set_num_threads(1)
     
     dataloaders = {}
     
@@ -343,7 +343,7 @@ def create_hq_voxceleb_dataloaders(split_json_path,
             cache_size=cache_size
         )
         
-        # 안전한 데이터로더 설정
+        # 기본 데이터로더 설정
         dataloader_kwargs = {
             'batch_size': batch_size,
             'shuffle': (split_type == 'train'),
@@ -351,13 +351,14 @@ def create_hq_voxceleb_dataloaders(split_json_path,
             'pin_memory': pin_memory and torch.cuda.is_available(),
         }
         
-        # 워커 수에 따른 설정
+        # 워커 수에 따른 설정 분기
         if num_workers > 0:
+            # 멀티프로세싱 모드
             dataloader_kwargs.update({
                 'num_workers': num_workers,
                 'persistent_workers': persistent_workers,
                 'prefetch_factor': prefetch_factor,
-                'timeout': 60,  # 타임아웃 단축
+                'timeout': 60,
                 'multiprocessing_context': 'spawn',
             })
         else:
@@ -365,7 +366,7 @@ def create_hq_voxceleb_dataloaders(split_json_path,
             dataloader_kwargs.update({
                 'num_workers': 0,
                 'persistent_workers': False,
-                'prefetch_factor': 2,
+                'prefetch_factor': None,  # 중요: 단일 프로세스일 때는 None
             })
         
         dataloaders[split_type] = DataLoader(dataset, **dataloader_kwargs)

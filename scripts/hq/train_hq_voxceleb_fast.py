@@ -231,8 +231,8 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=32,
-                       help='배치 크기 (기본값: 32)')
+    parser.add_argument('--batch_size', type=int, default=24,
+                       help='배치 크기 (기본값: 24)')
     parser.add_argument('--num_epochs', type=int, default=30,
                        help='학습 에포크 수 (기본값: 30)')
     parser.add_argument('--learning_rate', type=float, default=5e-5,

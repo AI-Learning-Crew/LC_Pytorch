@@ -63,7 +63,8 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
     # 안정성을 위해 Mixed Precision 비활성화
     scaler = None
     
-    train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
+    train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]', 
+                     leave=False, ncols=100)
     
     for batch_idx, batch in enumerate(train_pbar):
         try:
@@ -96,8 +97,8 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
                 'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
             })
             
-            # 메모리 정리 (매 50배치마다 - 성능 향상을 위해 빈도 감소)
-            if batch_idx % 50 == 0 and device.type == 'cuda':
+            # 메모리 정리 (매 100배치마다 - 성능 향상을 위해 빈도 감소)
+            if batch_idx % 100 == 0 and device.type == 'cuda':
                 torch.cuda.empty_cache()
                 
         except Exception as e:
@@ -119,7 +120,8 @@ def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epo
         return float('inf')
     
     with torch.no_grad():
-        val_pbar = tqdm(val_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]')
+        val_pbar = tqdm(val_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]', 
+                       leave=False, ncols=100)
         
         for batch_idx, batch in enumerate(val_pbar):
             try:
@@ -142,8 +144,8 @@ def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epo
                     'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
                 })
                 
-                # 메모리 정리 (매 20배치마다 - 성능 향상을 위해 빈도 감소)
-                if batch_idx % 20 == 0 and device.type == 'cuda':
+                # 메모리 정리 (매 50배치마다 - 성능 향상을 위해 빈도 감소)
+                if batch_idx % 50 == 0 and device.type == 'cuda':
                     torch.cuda.empty_cache()
                     
             except Exception as e:
@@ -253,16 +255,16 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=48,
-                       help='배치 크기 (기본값: 48)')
+    parser.add_argument('--batch_size', type=int, default=64,
+                       help='배치 크기 (기본값: 64)')
     parser.add_argument('--num_epochs', type=int, default=30,
                        help='학습 에포크 수 (기본값: 30)')
     parser.add_argument('--learning_rate', type=float, default=5e-5,
                        help='학습률 (기본값: 5e-5)')
     parser.add_argument('--weight_decay', type=float, default=1e-3,
                        help='가중치 감쇠 (기본값: 1e-3)')
-    parser.add_argument('--num_workers', type=int, default=4,
-                       help='데이터 로딩 워커 수 (기본값: 4)')
+    parser.add_argument('--num_workers', type=int, default=0,
+                       help='데이터 로딩 워커 수 (0=메인 프로세스, 기본값: 0)')
     parser.add_argument('--prefetch_factor', type=int, default=4,
                        help='워커당 미리 로드할 배치 수 (기본값: 4)')
     parser.add_argument('--cache_size', type=int, default=2000,
@@ -277,8 +279,8 @@ def main():
                        help='그래디언트 클리핑 노름 (기본값: 1.0)')
     
     # 오디오 설정
-    parser.add_argument('--audio_duration_sec', type=int, default=2,
-                       help='오디오 길이 (초) (기본값: 2)')
+    parser.add_argument('--audio_duration_sec', type=int, default=1,
+                       help='오디오 길이 (초) (기본값: 1)')
     parser.add_argument('--target_sr', type=int, default=16000,
                        help='오디오 샘플링 레이트 (기본값: 16000)')
     parser.add_argument('--image_size', type=int, default=224,
@@ -340,6 +342,11 @@ def main():
     
     print(f"데이터로더 설정: 워커={args.num_workers}, persistent_workers={persistent_workers}, pin_memory={pin_memory}")
     
+    # 워커가 0인 경우 pin_memory도 False로 설정 (안정성)
+    if args.num_workers == 0:
+        pin_memory = False
+        print("워커가 0이므로 pin_memory를 False로 설정")
+    
     dataloaders = create_hq_voxceleb_dataloaders(
         split_json_path=args.split_json_path,
         batch_size=args.batch_size,
@@ -372,6 +379,11 @@ def main():
         mel_time_steps=mel_time_steps  # 실제 데이터 차원에 맞춤
     )
     model.to(device)
+    
+    # 모델 성능 최적화
+    if device.type == 'cuda':
+        model = torch.compile(model)  # PyTorch 2.0 컴파일 최적화
+        print("모델 컴파일 완료 (PyTorch 2.0 최적화)")
     
     # 손실 함수 및 옵티마이저
     criterion = HQVoxCelebInfoNCELoss(temperature=args.temperature)

@@ -300,11 +300,11 @@ class HQVoxCelebDataset(Dataset):
 
 
 def create_hq_voxceleb_dataloaders(split_json_path, 
-                                  batch_size=64, num_workers=8,
+                                  batch_size=64, num_workers=2,
                                   audio_duration_sec=3, target_sr=16000, 
-                                  image_size=224, prefetch_factor=4,
+                                  image_size=224, prefetch_factor=2,
                                   pin_memory=True, persistent_workers=True,
-                                  enable_parallel=True, cache_size=2000):
+                                  enable_parallel=True, cache_size=500):
     """
     HQ VoxCeleb 데이터셋의 train/val/test 데이터로더를 생성합니다.
     
@@ -328,7 +328,7 @@ def create_hq_voxceleb_dataloaders(split_json_path,
     
     # 시스템 최적화 설정
     if enable_parallel:
-        torch.set_num_threads(2)  # 스레드 수 감소
+        torch.set_num_threads(1)  # 스레드 수 최소화
     
     dataloaders = {}
     
@@ -343,19 +343,32 @@ def create_hq_voxceleb_dataloaders(split_json_path,
             cache_size=cache_size
         )
         
-        # 멀티프로세싱 친화적 데이터로더 설정
-        dataloaders[split_type] = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=(split_type == 'train'),
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=persistent_workers and num_workers > 0,
-            prefetch_factor=prefetch_factor if num_workers > 0 else 2,
-            drop_last=True,
-            timeout=120,  # 타임아웃 감소
-            multiprocessing_context='spawn',  # spawn 방식 사용
-        )
+        # 안전한 데이터로더 설정
+        dataloader_kwargs = {
+            'batch_size': batch_size,
+            'shuffle': (split_type == 'train'),
+            'drop_last': True,
+            'pin_memory': pin_memory and torch.cuda.is_available(),
+        }
+        
+        # 워커 수에 따른 설정
+        if num_workers > 0:
+            dataloader_kwargs.update({
+                'num_workers': num_workers,
+                'persistent_workers': persistent_workers,
+                'prefetch_factor': prefetch_factor,
+                'timeout': 60,  # 타임아웃 단축
+                'multiprocessing_context': 'spawn',
+            })
+        else:
+            # 단일 프로세스 모드
+            dataloader_kwargs.update({
+                'num_workers': 0,
+                'persistent_workers': False,
+                'prefetch_factor': 2,
+            })
+        
+        dataloaders[split_type] = DataLoader(dataset, **dataloader_kwargs)
     
     return dataloaders
 

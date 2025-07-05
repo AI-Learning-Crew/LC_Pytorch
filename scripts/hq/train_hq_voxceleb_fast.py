@@ -96,8 +96,8 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
                 'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
             })
             
-            # 메모리 정리 (매 10배치마다)
-            if batch_idx % 10 == 0 and device.type == 'cuda':
+            # 메모리 정리 (매 50배치마다 - 성능 향상을 위해 빈도 감소)
+            if batch_idx % 50 == 0 and device.type == 'cuda':
                 torch.cuda.empty_cache()
                 
         except Exception as e:
@@ -142,8 +142,8 @@ def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epo
                     'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
                 })
                 
-                # 메모리 정리 (매 5배치마다)
-                if batch_idx % 5 == 0 and device.type == 'cuda':
+                # 메모리 정리 (매 20배치마다 - 성능 향상을 위해 빈도 감소)
+                if batch_idx % 20 == 0 and device.type == 'cuda':
                     torch.cuda.empty_cache()
                     
             except Exception as e:
@@ -253,20 +253,20 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=32,
-                       help='배치 크기 (기본값: 32)')
+    parser.add_argument('--batch_size', type=int, default=48,
+                       help='배치 크기 (기본값: 48)')
     parser.add_argument('--num_epochs', type=int, default=30,
                        help='학습 에포크 수 (기본값: 30)')
     parser.add_argument('--learning_rate', type=float, default=5e-5,
                        help='학습률 (기본값: 5e-5)')
     parser.add_argument('--weight_decay', type=float, default=1e-3,
                        help='가중치 감쇠 (기본값: 1e-3)')
-    parser.add_argument('--num_workers', type=int, default=0,
-                       help='데이터 로딩 워커 수 (0=메인 프로세스, 기본값: 0)')
-    parser.add_argument('--prefetch_factor', type=int, default=2,
-                       help='워커당 미리 로드할 배치 수 (기본값: 2)')
-    parser.add_argument('--cache_size', type=int, default=1000,
-                       help='데이터 캐시 크기 (기본값: 1000)')
+    parser.add_argument('--num_workers', type=int, default=4,
+                       help='데이터 로딩 워커 수 (기본값: 4)')
+    parser.add_argument('--prefetch_factor', type=int, default=4,
+                       help='워커당 미리 로드할 배치 수 (기본값: 4)')
+    parser.add_argument('--cache_size', type=int, default=2000,
+                       help='데이터 캐시 크기 (기본값: 2000)')
     parser.add_argument('--enable_parallel', action='store_true', default=True,
                        help='병렬 처리 활성화')
     
@@ -310,21 +310,21 @@ def main():
         # GPU 메모리 캐시 정리
         torch.cuda.empty_cache()
         
-        # 메모리 할당 전략 설정 (더 보수적으로)
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:64'
+        # 메모리 할당 전략 설정 (성능 최적화)
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
         
         # GPU 메모리 정보 출력
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
         print(f"GPU 메모리: {gpu_memory:.1f}GB")
         
-        # 메모리 사용량 모니터링 활성화 (더 보수적으로)
-        torch.cuda.memory.set_per_process_memory_fraction(0.8)  # GPU 메모리의 80% 사용
+        # 메모리 사용량 모니터링 활성화 (성능 최적화)
+        torch.cuda.memory.set_per_process_memory_fraction(0.9)  # GPU 메모리의 90% 사용
         
-        # Mixed Precision Training 활성화
-        torch.backends.cudnn.benchmark = False  # 안정성을 위해 False로 설정
-        torch.backends.cudnn.deterministic = True  # 재현성을 위해 True로 설정
+        # 성능 최적화 설정
+        torch.backends.cudnn.benchmark = True  # 성능 향상을 위해 True로 설정
+        torch.backends.cudnn.deterministic = False  # 성능 향상을 위해 False로 설정
         
-        print("GPU 메모리 최적화 설정 완료")
+        print("GPU 성능 최적화 설정 완료")
     
     # 데이터 파일 검증
     if not os.path.exists(args.split_json_path):
@@ -334,15 +334,11 @@ def main():
     # 병렬 처리 최적화된 데이터로더 생성
     print("병렬 처리 최적화된 데이터로더 생성 중...")
     
-    # 안정성을 위한 추가 설정
-    if args.num_workers > 0:
-        # 워커 수가 0보다 크면 persistent_workers 사용
-        persistent_workers = True
-        pin_memory = device.type == 'cuda'
-    else:
-        # 워커 수가 0이면 persistent_workers 비활성화
-        persistent_workers = False
-        pin_memory = False
+    # 성능 최적화를 위한 설정
+    persistent_workers = args.num_workers > 0
+    pin_memory = device.type == 'cuda'
+    
+    print(f"데이터로더 설정: 워커={args.num_workers}, persistent_workers={persistent_workers}, pin_memory={pin_memory}")
     
     dataloaders = create_hq_voxceleb_dataloaders(
         split_json_path=args.split_json_path,

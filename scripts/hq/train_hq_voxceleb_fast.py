@@ -255,20 +255,20 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=64,
-                       help='배치 크기 (기본값: 64)')
-    parser.add_argument('--num_epochs', type=int, default=30,
-                       help='학습 에포크 수 (기본값: 30)')
+    parser.add_argument('--batch_size', type=int, default=16,
+                       help='배치 크기 (기본값: 16)')
+    parser.add_argument('--num_epochs', type=int, default=10,
+                       help='학습 에포크 수 (기본값: 10)')
     parser.add_argument('--learning_rate', type=float, default=5e-5,
                        help='학습률 (기본값: 5e-5)')
     parser.add_argument('--weight_decay', type=float, default=1e-3,
                        help='가중치 감쇠 (기본값: 1e-3)')
     parser.add_argument('--num_workers', type=int, default=0,
                        help='데이터 로딩 워커 수 (0=메인 프로세스, 기본값: 0)')
-    parser.add_argument('--prefetch_factor', type=int, default=4,
-                       help='워커당 미리 로드할 배치 수 (기본값: 4)')
-    parser.add_argument('--cache_size', type=int, default=2000,
-                       help='데이터 캐시 크기 (기본값: 2000)')
+    parser.add_argument('--prefetch_factor', type=int, default=2,
+                       help='워커당 미리 로드할 배치 수 (기본값: 2)')
+    parser.add_argument('--cache_size', type=int, default=500,
+                       help='데이터 캐시 크기 (기본값: 500)')
     parser.add_argument('--enable_parallel', action='store_true', default=True,
                        help='병렬 처리 활성화')
     
@@ -338,14 +338,12 @@ def main():
     
     # 성능 최적화를 위한 설정
     persistent_workers = args.num_workers > 0
-    pin_memory = device.type == 'cuda'
+    pin_memory = device.type == 'cuda' and args.num_workers > 0  # 워커가 0이면 pin_memory도 False
     
     print(f"데이터로더 설정: 워커={args.num_workers}, persistent_workers={persistent_workers}, pin_memory={pin_memory}")
     
-    # 워커가 0인 경우 pin_memory도 False로 설정 (안정성)
-    if args.num_workers == 0:
-        pin_memory = False
-        print("워커가 0이므로 pin_memory를 False로 설정")
+    # 워커가 0인 경우 prefetch_factor도 None으로 설정
+    prefetch_factor = args.prefetch_factor if args.num_workers > 0 else None
     
     dataloaders = create_hq_voxceleb_dataloaders(
         split_json_path=args.split_json_path,
@@ -354,7 +352,7 @@ def main():
         audio_duration_sec=args.audio_duration_sec,
         target_sr=args.target_sr,
         image_size=args.image_size,
-        prefetch_factor=args.prefetch_factor,
+        prefetch_factor=prefetch_factor,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         enable_parallel=args.enable_parallel,
@@ -368,6 +366,16 @@ def main():
     print(f"검증 데이터: {len(val_dataloader.dataset)}개 샘플")
     print(f"학습 배치 수: {len(train_dataloader)}")
     print(f"검증 배치 수: {len(val_dataloader)}")
+    
+    # 첫 번째 배치 테스트 (디버깅용)
+    print("첫 번째 배치 테스트 중...")
+    try:
+        test_batch = next(iter(train_dataloader))
+        print(f"배치 테스트 성공: mel shape={test_batch['mel'].shape}, face shape={test_batch['face'].shape}")
+        print(f"첫 번째 identity: {test_batch['identity'][0]}")
+    except Exception as e:
+        print(f"배치 테스트 실패: {e}")
+        return 1
     
     # 모델 초기화
     print("모델 초기화 중...")

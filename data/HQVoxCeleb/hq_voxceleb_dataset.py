@@ -276,27 +276,43 @@ class HQVoxCelebDataset(Dataset):
         return len(self.file_pairs)
     
     def __getitem__(self, idx):
-        # 간단한 캐시 확인 (lock 없이)
-        if idx in self.cache:
-            return self.cache[idx]
-        
-        pair = self.file_pairs[idx]
-        
-        # 데이터 로드
-        mel = self._load_mel_spectrogram(pair['mel_path'])
-        face = self._load_face_image(pair['face_path'])
-        
-        data = {
-            'mel': mel,
-            'face': face,
-            'identity': pair['identity']
-        }
-        
-        # 캐시에 저장 (크기 제한)
-        if len(self.cache) < self.cache_size:
-            self.cache[idx] = data
-        
-        return data
+        try:
+            # 간단한 캐시 확인 (lock 없이)
+            if idx in self.cache:
+                return self.cache[idx]
+            
+            pair = self.file_pairs[idx]
+            
+            # 데이터 로드
+            mel = self._load_mel_spectrogram(pair['mel_path'])
+            face = self._load_face_image(pair['face_path'])
+            
+            data = {
+                'mel': mel,
+                'face': face,
+                'identity': pair['identity']
+            }
+            
+            # 캐시에 저장 (크기 제한)
+            if len(self.cache) < self.cache_size:
+                self.cache[idx] = data
+            
+            return data
+            
+        except Exception as e:
+            print(f"데이터 로드 오류 (idx={idx}): {e}")
+            # 오류 발생 시 첫 번째 샘플을 반환 (안전장치)
+            if idx > 0:
+                return self.__getitem__(0)
+            else:
+                # 첫 번째 샘플도 오류인 경우 더미 데이터 반환
+                dummy_mel = torch.zeros(80, int(self.audio_duration_sec * 100))
+                dummy_face = torch.zeros(3, self.image_size, self.image_size)
+                return {
+                    'mel': dummy_mel,
+                    'face': dummy_face,
+                    'identity': 'dummy'
+                }
 
 
 def create_hq_voxceleb_dataloaders(split_json_path, 
@@ -348,7 +364,6 @@ def create_hq_voxceleb_dataloaders(split_json_path,
             'batch_size': batch_size,
             'shuffle': (split_type == 'train'),
             'drop_last': True,
-            'pin_memory': pin_memory and torch.cuda.is_available(),
         }
         
         # 워커 수에 따른 설정 분기
@@ -358,15 +373,17 @@ def create_hq_voxceleb_dataloaders(split_json_path,
                 'num_workers': num_workers,
                 'persistent_workers': persistent_workers,
                 'prefetch_factor': prefetch_factor,
+                'pin_memory': pin_memory and torch.cuda.is_available(),
                 'timeout': 60,
                 'multiprocessing_context': 'spawn',
             })
         else:
-            # 단일 프로세스 모드
+            # 단일 프로세스 모드 (안정성 우선)
             dataloader_kwargs.update({
                 'num_workers': 0,
                 'persistent_workers': False,
                 'prefetch_factor': None,  # 중요: 단일 프로세스일 때는 None
+                'pin_memory': False,  # 단일 프로세스에서는 pin_memory 비활성화
             })
         
         dataloaders[split_type] = DataLoader(dataset, **dataloader_kwargs)

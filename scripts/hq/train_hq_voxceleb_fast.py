@@ -39,7 +39,7 @@ import threading
 from models.hq.hq_voxceleb_model import (
     HQVoxCelebModel, HQVoxCelebInfoNCELoss, save_hq_voxceleb_model_components
 )
-from data.HQVoxCeleb.hq_voxceleb_dataset import create_hq_voxceleb_dataloaders_parallel
+from data.HQVoxCeleb.hq_voxceleb_dataset import create_hq_voxceleb_dataloaders
 
 # 시스템 최적화 설정
 os.environ['OMP_NUM_THREADS'] = '4'
@@ -231,7 +231,7 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=32,  # 16 -> 32로 증가
+    parser.add_argument('--batch_size', type=int, default=32,
                        help='배치 크기 (기본값: 32)')
     parser.add_argument('--num_epochs', type=int, default=50,
                        help='학습 에포크 수 (기본값: 50)')
@@ -239,12 +239,14 @@ def main():
                        help='학습률 (기본값: 1e-4)')
     parser.add_argument('--weight_decay', type=float, default=5e-4,
                        help='가중치 감쇠 (기본값: 5e-4)')
-    parser.add_argument('--num_workers', type=int, default=16,  # 8 -> 16으로 증가
+    parser.add_argument('--num_workers', type=int, default=16,
                        help='데이터 로딩 워커 수 (기본값: 16)')
-    parser.add_argument('--prefetch_factor', type=int, default=8,  # 4 -> 8로 증가
+    parser.add_argument('--prefetch_factor', type=int, default=8,
                        help='워커당 미리 로드할 배치 수 (기본값: 8)')
-    parser.add_argument('--cache_size', type=int, default=3000,  # 캐시 크기 증가
+    parser.add_argument('--cache_size', type=int, default=3000,
                        help='데이터 캐시 크기 (기본값: 3000)')
+    parser.add_argument('--enable_parallel', action='store_true', default=True,
+                       help='병렬 처리 활성화')
     
     # 정규화 설정
     parser.add_argument('--patience', type=int, default=5,
@@ -303,7 +305,7 @@ def main():
     
     # 병렬 처리 최적화된 데이터로더 생성
     print("병렬 처리 최적화된 데이터로더 생성 중...")
-    dataloaders = create_hq_voxceleb_dataloaders_parallel(
+    dataloaders = create_hq_voxceleb_dataloaders(
         split_json_path=args.split_json_path,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -313,6 +315,7 @@ def main():
         prefetch_factor=args.prefetch_factor,
         pin_memory=True,
         persistent_workers=True,
+        enable_parallel=args.enable_parallel,
         cache_size=args.cache_size
     )
     

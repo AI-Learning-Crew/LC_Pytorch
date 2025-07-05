@@ -18,18 +18,29 @@ from functools import lru_cache
 import pickle
 from typing import Dict, List, Tuple, Any
 import threading
-import queue
 import time
 
 
-class HQVoxCelebDatasetParallel(Dataset):
+class HQVoxCelebDataset(Dataset):
     """
-    병렬 처리 최적화된 HQ VoxCeleb 데이터셋 클래스
+    HQ VoxCeleb 데이터셋을 위한 데이터셋 클래스 (병렬 처리 최적화)
+    
+    데이터 구조:
+    data/HQVoxCeleb/
+    ├── vox1/
+    │   ├── vox1_meta.csv
+    │   ├── mel_spectograms/ (또는 mel_spectrograms)
+    │   └── masked_faces/
+    ├── vox2/
+    │   ├── full_vox2_meta.csv
+    │   ├── mel_spectograms/ (또는 mel_spectrograms)
+    │   └── masked_faces/
+    └── split.json
     """
     
     def __init__(self, split_json_path, split_type='train', 
                  audio_duration_sec=5, target_sr=16000, image_size=224,
-                 cache_size=2000, num_prefetch_workers=4):
+                 enable_parallel=True, cache_size=2000):
         """
         Args:
             split_json_path (str): split.json 파일 경로
@@ -37,20 +48,21 @@ class HQVoxCelebDatasetParallel(Dataset):
             audio_duration_sec (int): 오디오 길이 (초)
             target_sr (int): 오디오 샘플링 레이트
             image_size (int): 이미지 크기
+            enable_parallel (bool): 병렬 처리 활성화
             cache_size (int): 캐시 크기
-            num_prefetch_workers (int): 미리 로드할 워커 수
         """
         self.split_type = split_type
         self.audio_duration_sec = audio_duration_sec
         self.target_sr = target_sr
         self.image_size = image_size
+        self.enable_parallel = enable_parallel
         self.cache_size = cache_size
-        self.num_prefetch_workers = num_prefetch_workers
         
-        # 캐시 및 동기화 객체
-        self.cache = {}
-        self.cache_lock = threading.Lock()
-        self.access_count = {}
+        # 병렬 처리 활성화 시 캐시 및 동기화 객체
+        if self.enable_parallel:
+            self.cache = {}
+            self.cache_lock = threading.Lock()
+            self.access_count = {}
         
         # split.json 로드
         with open(split_json_path, 'r', encoding='utf-8') as f:
@@ -62,28 +74,27 @@ class HQVoxCelebDatasetParallel(Dataset):
             if split_type in split_data[dataset_type]:
                 self.identities.extend(split_data[dataset_type][split_type])
         
-        # 데이터 경로 설정
+        # 데이터 경로 설정 (vox1과 vox2 디렉토리 모두 포함)
         self.vox_dir = Path(split_json_path).parent
         self.vox1_mel_dir = self.vox_dir / 'vox1' / 'mel_spectograms'
         self.vox1_face_dir = self.vox_dir / 'vox1' / 'masked_faces'
         self.vox2_mel_dir = self.vox_dir / 'vox2' / 'mel_spectograms'
         self.vox2_face_dir = self.vox_dir / 'vox2' / 'masked_faces'
         
-        # 대체 경로 확인
+        # 디렉토리 존재 확인 및 대체 경로 시도
         self._check_alternative_paths()
         
-        # 파일 쌍 생성 (병렬 처리)
-        self.file_pairs = self._create_file_pairs_parallel()
+        # 파일 쌍 생성 (병렬 처리 가능)
+        if self.enable_parallel:
+            self.file_pairs = self._create_file_pairs_parallel()
+        else:
+            self.file_pairs = self._create_file_pairs()
         
         # 데이터 변환기 설정
         self.image_transform = self._get_image_transform()
+        self.audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
         
-        # 미리 로드 스레드 풀 생성
-        self.prefetch_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.num_prefetch_workers
-        )
-        
-        print(f"HQ VoxCeleb {split_type}: {len(self.file_pairs)}개 파일 쌍 (병렬 처리 최적화)")
+        print(f"HQ VoxCeleb {split_type}: {len(self.file_pairs)}개 파일 쌍 {'(병렬 처리)' if enable_parallel else ''}")
     
     def _check_alternative_paths(self):
         """대체 경로 확인"""
@@ -104,6 +115,35 @@ class HQVoxCelebDatasetParallel(Dataset):
                         self.vox1_face_dir = alt_face_dir
                     else:
                         self.vox2_face_dir = alt_face_dir
+    
+    def _create_file_pairs(self):
+        """기존 방식으로 파일 쌍을 생성합니다."""
+        file_pairs = []
+        
+        for identity in self.identities:
+            # vox1과 vox2 디렉토리 모두에서 identity 확인
+            mel_identity_dir_vox1 = self.vox1_mel_dir / identity
+            face_identity_dir_vox1 = self.vox1_face_dir / identity
+            mel_identity_dir_vox2 = self.vox2_mel_dir / identity
+            face_identity_dir_vox2 = self.vox2_face_dir / identity
+            
+            # vox1에서 찾기
+            if mel_identity_dir_vox1.exists() and face_identity_dir_vox1.exists():
+                mel_files = list(mel_identity_dir_vox1.glob("*.npy")) + list(mel_identity_dir_vox1.glob("*.pickle"))
+                face_files = list(face_identity_dir_vox1.glob("*.jpg")) + list(face_identity_dir_vox1.glob("*.png"))
+                
+                file_pairs.extend(self._match_files(mel_files, face_files, identity))
+                
+            # vox2에서 찾기
+            elif mel_identity_dir_vox2.exists() and face_identity_dir_vox2.exists():
+                mel_files = list(mel_identity_dir_vox2.glob("*.npy")) + list(mel_identity_dir_vox2.glob("*.pickle"))
+                face_files = list(face_identity_dir_vox2.glob("*.jpg")) + list(face_identity_dir_vox2.glob("*.png"))
+                
+                file_pairs.extend(self._match_files(mel_files, face_files, identity))
+            else:
+                continue
+        
+        return file_pairs
     
     def _process_identity_parallel(self, identity):
         """단일 identity 처리 (병렬 처리용)"""
@@ -189,9 +229,8 @@ class HQVoxCelebDatasetParallel(Dataset):
                                std=[0.229, 0.224, 0.225])
         ])
     
-    @lru_cache(maxsize=1000)
-    def _load_mel_spectrogram_cached(self, mel_path):
-        """캐시된 Mel spectrogram 로드"""
+    def _load_mel_spectrogram(self, mel_path):
+        """Mel spectrogram을 로드하고 처리합니다."""
         if mel_path.endswith('.pickle'):
             with open(mel_path, 'rb') as f:
                 mel_data = pickle.load(f)
@@ -222,20 +261,23 @@ class HQVoxCelebDatasetParallel(Dataset):
         
         return torch.FloatTensor(mel)
     
-    @lru_cache(maxsize=1000)
-    def _load_face_image_cached(self, face_path):
-        """캐시된 얼굴 이미지 로드"""
+    def _load_face_image(self, face_path):
+        """얼굴 이미지를 로드하고 처리합니다."""
         image = Image.open(face_path).convert('RGB')
         return self.image_transform(image)
     
     def _load_data_parallel(self, mel_path, face_path):
         """병렬로 데이터 로드"""
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            mel_future = executor.submit(self._load_mel_spectrogram_cached, mel_path)
-            face_future = executor.submit(self._load_face_image_cached, face_path)
-            
-            mel = mel_future.result()
-            face = face_future.result()
+        if self.enable_parallel:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                mel_future = executor.submit(self._load_mel_spectrogram, mel_path)
+                face_future = executor.submit(self._load_face_image, face_path)
+                
+                mel = mel_future.result()
+                face = face_future.result()
+        else:
+            mel = self._load_mel_spectrogram(mel_path)
+            face = self._load_face_image(face_path)
         
         return mel, face
     
@@ -243,15 +285,16 @@ class HQVoxCelebDatasetParallel(Dataset):
         return len(self.file_pairs)
     
     def __getitem__(self, idx):
-        # 캐시 확인
-        with self.cache_lock:
-            if idx in self.cache:
-                self.access_count[idx] = self.access_count.get(idx, 0) + 1
-                return self.cache[idx]
+        # 병렬 처리 활성화 시 캐시 확인
+        if self.enable_parallel:
+            with self.cache_lock:
+                if idx in self.cache:
+                    self.access_count[idx] = self.access_count.get(idx, 0) + 1
+                    return self.cache[idx]
         
         pair = self.file_pairs[idx]
         
-        # 병렬 데이터 로드
+        # 데이터 로드 (병렬 처리 가능)
         mel, face = self._load_data_parallel(pair['mel_path'], pair['face_path'])
         
         data = {
@@ -260,50 +303,64 @@ class HQVoxCelebDatasetParallel(Dataset):
             'identity': pair['identity']
         }
         
-        # 캐시에 저장 (크기 제한)
-        with self.cache_lock:
-            if len(self.cache) >= self.cache_size:
-                # LRU 캐시 정리
-                min_access_idx = min(self.access_count.items(), key=lambda x: x[1])[0]
-                del self.cache[min_access_idx]
-                del self.access_count[min_access_idx]
-            
-            self.cache[idx] = data
-            self.access_count[idx] = 1
+        # 병렬 처리 활성화 시 캐시에 저장
+        if self.enable_parallel:
+            with self.cache_lock:
+                if len(self.cache) >= self.cache_size:
+                    # LRU 캐시 정리
+                    if self.access_count:
+                        min_access_idx = min(self.access_count.items(), key=lambda x: x[1])[0]
+                        del self.cache[min_access_idx]
+                        del self.access_count[min_access_idx]
+                
+                self.cache[idx] = data
+                self.access_count[idx] = 1
         
         return data
-    
-    def __del__(self):
-        """소멸자에서 스레드 풀 정리"""
-        if hasattr(self, 'prefetch_executor'):
-            self.prefetch_executor.shutdown(wait=True)
 
 
-def create_hq_voxceleb_dataloaders_parallel(split_json_path, 
-                                           batch_size=64, num_workers=16,
-                                           audio_duration_sec=3, target_sr=16000, 
-                                           image_size=224, prefetch_factor=8,
-                                           pin_memory=True, persistent_workers=True,
-                                           cache_size=2000):
+def create_hq_voxceleb_dataloaders(split_json_path, 
+                                  batch_size=64, num_workers=8,
+                                  audio_duration_sec=3, target_sr=16000, 
+                                  image_size=224, prefetch_factor=4,
+                                  pin_memory=True, persistent_workers=True,
+                                  enable_parallel=True, cache_size=2000):
     """
-    병렬 처리 최적화된 HQ VoxCeleb 데이터로더 생성
+    HQ VoxCeleb 데이터셋의 train/val/test 데이터로더를 생성합니다.
+    
+    Args:
+        split_json_path (str): split.json 파일 경로
+        batch_size (int): 배치 크기
+        num_workers (int): 데이터 로딩 워커 수
+        audio_duration_sec (int): 오디오 길이 (초)
+        target_sr (int): 오디오 샘플링 레이트
+        image_size (int): 이미지 크기
+        prefetch_factor (int): 워커당 미리 로드할 배치 수
+        pin_memory (bool): GPU 메모리 고정
+        persistent_workers (bool): 워커 재사용
+        enable_parallel (bool): 병렬 처리 활성화
+        cache_size (int): 캐시 크기
+    
+    Returns:
+        dict: train, val, test 데이터로더가 포함된 딕셔너리
     """
     from torch.utils.data import DataLoader
     
     # 시스템 최적화 설정
-    torch.set_num_threads(4)  # PyTorch 스레드 수 제한
+    if enable_parallel:
+        torch.set_num_threads(4)
     
     dataloaders = {}
     
     for split_type in ['train', 'val', 'test']:
-        dataset = HQVoxCelebDatasetParallel(
+        dataset = HQVoxCelebDataset(
             split_json_path=split_json_path,
             split_type=split_type,
             audio_duration_sec=audio_duration_sec,
             target_sr=target_sr,
             image_size=image_size,
-            cache_size=cache_size,
-            num_prefetch_workers=4
+            enable_parallel=enable_parallel,
+            cache_size=cache_size
         )
         
         # 고성능 데이터로더 설정
@@ -314,34 +371,21 @@ def create_hq_voxceleb_dataloaders_parallel(split_json_path,
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers and num_workers > 0,
-            prefetch_factor=prefetch_factor if num_workers > 0 else 4,
+            prefetch_factor=prefetch_factor if num_workers > 0 else 2,
             drop_last=True,
-            multiprocessing_context='spawn' if num_workers > 0 else None,
             timeout=300,  # 5분 타임아웃
         )
     
     return dataloaders
 
 
-# 별칭 생성 (기존 코드와 호환성)
-def create_hq_voxceleb_dataloaders(*args, **kwargs):
-    """기존 함수와 호환성 유지"""
-    return create_hq_voxceleb_dataloaders_parallel(*args, **kwargs)
-
-
-def collate_hq_voxceleb_fn_parallel(batch):
+def collate_hq_voxceleb_fn(batch):
     """
-    병렬 처리 최적화된 collate 함수
+    HQ VoxCeleb 데이터셋을 위한 collate 함수
     """
-    # 병렬로 데이터 처리
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        mel_future = executor.submit(lambda: torch.stack([item['mel'] for item in batch]))
-        face_future = executor.submit(lambda: torch.stack([item['face'] for item in batch]))
-        identity_future = executor.submit(lambda: [item['identity'] for item in batch])
-        
-        mels = mel_future.result()
-        faces = face_future.result()
-        identities = identity_future.result()
+    mels = torch.stack([item['mel'] for item in batch])
+    faces = torch.stack([item['face'] for item in batch])
+    identities = [item['identity'] for item in batch]
     
     return {
         'mel': mels,

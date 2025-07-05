@@ -62,6 +62,9 @@ class HQVoxCelebDataset(Dataset):
         self.cache = {}
         self.access_count = {}
         
+        # 멀티프로세싱 안정성을 위한 설정
+        self._audio_processor = None  # 지연 로드
+        
         # split.json 로드
         with open(split_json_path, 'r', encoding='utf-8') as f:
             split_data = json.load(f)
@@ -231,9 +234,9 @@ class HQVoxCelebDataset(Dataset):
     
     def _get_audio_processor(self):
         """오디오 프로세서를 지연 로드합니다."""
-        if self.audio_processor is None:
-            self.audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
-        return self.audio_processor
+        if self._audio_processor is None:
+            self._audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
+        return self._audio_processor
     
     def _load_mel_spectrogram(self, mel_path):
         """Mel spectrogram을 로드하고 처리합니다."""
@@ -316,7 +319,7 @@ class HQVoxCelebDataset(Dataset):
 
 
 def create_hq_voxceleb_dataloaders(split_json_path, 
-                                  batch_size=64, num_workers=2,
+                                  batch_size=64, num_workers=0,
                                   audio_duration_sec=3, target_sr=16000, 
                                   image_size=224, prefetch_factor=2,
                                   pin_memory=True, persistent_workers=True,
@@ -368,13 +371,13 @@ def create_hq_voxceleb_dataloaders(split_json_path,
         
         # 워커 수에 따른 설정 분기
         if num_workers > 0:
-            # 멀티프로세싱 모드
+            # 멀티프로세싱 모드 (안정성 강화)
             dataloader_kwargs.update({
-                'num_workers': num_workers,
-                'persistent_workers': persistent_workers,
-                'prefetch_factor': prefetch_factor,
+                'num_workers': min(num_workers, 2),  # 최대 2개로 제한
+                'persistent_workers': False,  # 안정성을 위해 비활성화
+                'prefetch_factor': min(prefetch_factor, 2),  # 최대 2개로 제한
                 'pin_memory': pin_memory and torch.cuda.is_available(),
-                'timeout': 60,
+                'timeout': 120,  # 타임아웃 증가
                 'multiprocessing_context': 'spawn',
             })
         else:

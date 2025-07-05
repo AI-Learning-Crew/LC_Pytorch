@@ -21,10 +21,12 @@ class HQVoxCelebModel(nn.Module):
     - 투영층: 얼굴과 음성을 공통 임베딩 공간으로 매핑
     """
     
-    def __init__(self, embedding_dim=512, pretrained=True):
+    def __init__(self, embedding_dim=512, pretrained=True, mel_freq_bins=80, mel_time_steps=400):
         super(HQVoxCelebModel, self).__init__()
         
         self.embedding_dim = embedding_dim
+        self.mel_freq_bins = mel_freq_bins
+        self.mel_time_steps = mel_time_steps
         
         # 얼굴 인코더 (ViT-Base)
         self.face_encoder = vit_b_16(pretrained=pretrained)
@@ -32,17 +34,12 @@ class HQVoxCelebModel(nn.Module):
         self.face_encoder.heads = nn.Identity()
         # 그래디언트 체크포인팅 비활성화 (속도 향상)
         self.face_encoder.gradient_checkpointing = False
-        # 메모리 최적화: mixed precision 지원
-        self.face_encoder.half = lambda: self.face_encoder
         face_feature_dim = 768  # ViT-Base의 출력 차원
         
-        # 음성 인코더 (Wav2Vec2-Base)
-        self.audio_encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base")
-        # 그래디언트 체크포인팅 비활성화 (속도 향상)
-        self.audio_encoder.gradient_checkpointing = False
-        # 메모리 최적화: mixed precision 지원
-        self.audio_encoder.half = lambda: self.audio_encoder
-        audio_feature_dim = 768  # Wav2Vec2-Base의 출력 차원
+        # 음성 인코더 (Wav2Vec2-Base) - 실제로는 사용하지 않음
+        # self.audio_encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base")
+        # self.audio_encoder.gradient_checkpointing = False
+        # audio_feature_dim = 768  # Wav2Vec2-Base의 출력 차원
         
         # 투영층
         self.face_projection = nn.Sequential(
@@ -55,9 +52,17 @@ class HQVoxCelebModel(nn.Module):
             nn.Linear(embedding_dim, embedding_dim)
         )
         
-        # 동적 음성 투영층 (나중에 초기화)
-        self.audio_projection = None
-        self.audio_input_dim = None
+        # 고정된 음성 투영층 (미리 생성하여 속도 향상)
+        mel_input_dim = mel_freq_bins * mel_time_steps  # mel spectrogram을 평탄화한 크기
+        self.audio_projection = nn.Sequential(
+            nn.Linear(mel_input_dim, embedding_dim * 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim, embedding_dim)
+        )
         
         # L2 정규화를 위한 파라미터
         self.temperature = nn.Parameter(torch.ones([]) * 0.07)
@@ -72,35 +77,27 @@ class HQVoxCelebModel(nn.Module):
     
     def encode_audio(self, mel_spectrograms):
         """Mel spectrogram을 인코딩합니다."""
-        # Wav2Vec2는 [B, T] 입력을 받지만, mel spectrogram은 [B, F, T]
-        # 따라서 시간 차원을 평균하여 [B, F]로 만든 후 처리
-        if len(mel_spectrograms.shape) == 3:
-            # [B, F, T] -> [B, F] (시간 차원 평균)
-            mel_spectrograms = mel_spectrograms.mean(dim=2)
-        
-        # Wav2Vec2 특성 추출을 위해 가상의 오디오 시퀀스 생성
         batch_size = mel_spectrograms.shape[0]
-        # mel spectrogram을 1D로 평탄화하여 오디오 특성으로 사용
-        audio_features = mel_spectrograms.view(batch_size, -1)
         
-        # 음성 투영층 동적 생성 - mel spectrogram의 크기가 가변적이므로 런타임에 투영층을 생성
-        if self.audio_projection is None or self.audio_input_dim != audio_features.shape[1]:
-            # 현재 batch의 audio_features 차원을 저장 (mel spectrogram을 평탄화한 크기)
-            self.audio_input_dim = audio_features.shape[1]
-            print(f"음성 투영층 생성: {self.audio_input_dim} -> {self.embedding_dim}")
-            
-            # 2층 신경망으로 구성된 투영층 생성:
-            # 1. 첫 번째 Linear: 가변 크기의 mel spectrogram 특성을 embedding_dim으로 압축
-            # 2. ReLU: 비선형 활성화 함수로 표현력 증가  
-            # 3. 두 번째 Linear: embedding_dim을 유지하면서 더 나은 특성 추출
-            self.audio_projection = nn.Sequential(
-                nn.Linear(self.audio_input_dim, self.embedding_dim),  # 입력 차원을 임베딩 차원으로 변환
-                nn.ReLU(),                                            # 비선형성 추가
-                nn.Linear(self.embedding_dim, self.embedding_dim)     # 임베딩 공간에서의 정제
-            ).to(audio_features.device)  # 현재 텐서와 같은 디바이스(CPU/GPU)로 투영층 이동
+        # mel spectrogram을 평탄화: [B, F, T] -> [B, F*T]
+        if len(mel_spectrograms.shape) == 3:
+            audio_features = mel_spectrograms.view(batch_size, -1)
+        else:
+            audio_features = mel_spectrograms
         
-        # Wav2Vec2 인코더 통과 (실제로는 mel spectrogram을 직접 처리)
-        # 여기서는 mel spectrogram을 직접 투영층에 통과시킴
+        # 입력 차원 검증 및 조정
+        expected_dim = self.mel_freq_bins * self.mel_time_steps
+        if audio_features.shape[1] != expected_dim:
+            # 차원이 다르면 조정 (패딩 또는 자르기)
+            if audio_features.shape[1] > expected_dim:
+                audio_features = audio_features[:, :expected_dim]
+            else:
+                # 패딩으로 차원 맞추기
+                padding = torch.zeros(batch_size, expected_dim - audio_features.shape[1], 
+                                    device=audio_features.device, dtype=audio_features.dtype)
+                audio_features = torch.cat([audio_features, padding], dim=1)
+        
+        # 투영층 통과
         audio_embeddings = self.audio_projection(audio_features)  # [B, embedding_dim]
         audio_embeddings = F.normalize(audio_embeddings, p=2, dim=1)
         return audio_embeddings
@@ -170,10 +167,6 @@ def save_hq_voxceleb_model_components(model, save_dir):
                os.path.join(save_dir, 'face_projection.pth'))
     
     # 음성 인코더 저장
-    torch.save(model.audio_encoder.state_dict(), 
-               os.path.join(save_dir, 'audio_encoder.pth'))
-    
-    # 음성 투영층 저장
     torch.save(model.audio_projection.state_dict(), 
                os.path.join(save_dir, 'audio_projection.pth'))
     
@@ -203,11 +196,6 @@ def load_hq_voxceleb_model_components(model, save_dir):
     face_projection_path = os.path.join(save_dir, 'face_projection.pth')
     if os.path.exists(face_projection_path):
         model.face_projection.load_state_dict(torch.load(face_projection_path))
-    
-    # 음성 인코더 로드
-    audio_encoder_path = os.path.join(save_dir, 'audio_encoder.pth')
-    if os.path.exists(audio_encoder_path):
-        model.audio_encoder.load_state_dict(torch.load(audio_encoder_path))
     
     # 음성 투영층 로드
     audio_projection_path = os.path.join(save_dir, 'audio_projection.pth')

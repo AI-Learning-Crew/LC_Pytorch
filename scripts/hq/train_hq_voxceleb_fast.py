@@ -35,6 +35,7 @@ from tqdm.auto import tqdm
 import json
 import time
 import threading
+from torch.cuda.amp import autocast, GradScaler
 
 from models.hq.hq_voxceleb_model import (
     HQVoxCelebModel, HQVoxCelebInfoNCELoss, save_hq_voxceleb_model_components
@@ -48,10 +49,13 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 
 def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoch, num_epochs, grad_clip_norm=1.0):
-    """고속 학습을 위한 에포크 함수"""
+    """고속 학습을 위한 에포크 함수 (Mixed Precision Training 포함)"""
     model.train()
     total_loss = 0.0
     num_batches = len(train_dataloader)
+    
+    # Mixed Precision Training을 위한 GradScaler
+    scaler = GradScaler()
     
     train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
     
@@ -61,21 +65,25 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
         faces = batch['face'].to(device, non_blocking=True)    # non_blocking=True로 메모리 전송 최적화
         identities = batch['identity']
         
-        # 순전파
-        face_embeddings, audio_embeddings = model(mels, faces)
-        
-        # 손실 계산
-        loss = criterion(face_embeddings, audio_embeddings)
+        # Mixed Precision Training
+        with autocast():
+            # 순전파
+            face_embeddings, audio_embeddings = model(mels, faces)
+            
+            # 손실 계산
+            loss = criterion(face_embeddings, audio_embeddings)
         
         # 역전파
         optimizer.zero_grad()
-        loss.backward()
+        scaler.scale(loss).backward()
         
         # 그래디언트 클리핑 (오버피팅 방지)
         if grad_clip_norm > 0:
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         
         # 손실 누적 및 진행률 업데이트
         total_loss += loss.item()
@@ -93,7 +101,7 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
 
 
 def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epochs):
-    """고속 검증을 위한 에포크 함수"""
+    """고속 검증을 위한 에포크 함수 (Mixed Precision Training 포함)"""
     model.eval()
     total_loss = 0.0
     num_batches = len(val_dataloader)
@@ -111,11 +119,13 @@ def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epo
             faces = batch['face'].to(device, non_blocking=True)    # non_blocking=True로 메모리 전송 최적화
             identities = batch['identity']
             
-            # 순전파
-            face_embeddings, audio_embeddings = model(mels, faces)
-            
-            # 손실 계산
-            loss = criterion(face_embeddings, audio_embeddings)
+            # Mixed Precision Training
+            with autocast():
+                # 순전파
+                face_embeddings, audio_embeddings = model(mels, faces)
+                
+                # 손실 계산
+                loss = criterion(face_embeddings, audio_embeddings)
             
             # 손실 누적 및 진행률 업데이트
             total_loss += loss.item()
@@ -231,20 +241,20 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=24,
-                       help='배치 크기 (기본값: 24)')
+    parser.add_argument('--batch_size', type=int, default=48,
+                       help='배치 크기 (기본값: 48)')
     parser.add_argument('--num_epochs', type=int, default=30,
                        help='학습 에포크 수 (기본값: 30)')
     parser.add_argument('--learning_rate', type=float, default=5e-5,
                        help='학습률 (기본값: 5e-5)')
     parser.add_argument('--weight_decay', type=float, default=1e-3,
                        help='가중치 감쇠 (기본값: 1e-3)')
-    parser.add_argument('--num_workers', type=int, default=0,
-                       help='데이터 로딩 워커 수 (기본값: 0)')
-    parser.add_argument('--prefetch_factor', type=int, default=2,
-                       help='워커당 미리 로드할 배치 수 (기본값: 2)')
-    parser.add_argument('--cache_size', type=int, default=1000,
-                       help='데이터 캐시 크기 (기본값: 1000)')
+    parser.add_argument('--num_workers', type=int, default=6,
+                       help='데이터 로딩 워커 수 (기본값: 6)')
+    parser.add_argument('--prefetch_factor', type=int, default=3,
+                       help='워커당 미리 로드할 배치 수 (기본값: 3)')
+    parser.add_argument('--cache_size', type=int, default=2000,
+                       help='데이터 캐시 크기 (기본값: 2000)')
     parser.add_argument('--enable_parallel', action='store_true', default=True,
                        help='병렬 처리 활성화')
     
@@ -289,14 +299,18 @@ def main():
         torch.cuda.empty_cache()
         
         # 메모리 할당 전략 설정
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
         
         # GPU 메모리 정보 출력
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
         print(f"GPU 메모리: {gpu_memory:.1f}GB")
         
         # 메모리 사용량 모니터링 활성화
-        torch.cuda.memory.set_per_process_memory_fraction(0.8)  # GPU 메모리의 80%만 사용
+        torch.cuda.memory.set_per_process_memory_fraction(0.9)  # GPU 메모리의 90% 사용
+        
+        # Mixed Precision Training 활성화
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
     
     # 데이터 파일 검증
     if not os.path.exists(args.split_json_path):
@@ -329,9 +343,12 @@ def main():
     
     # 모델 초기화
     print("모델 초기화 중...")
+    mel_time_steps = args.audio_duration_sec * 100  # 실제 데이터 차원에 맞춤
     model = HQVoxCelebModel(
         embedding_dim=args.embedding_dim,
-        pretrained=True
+        pretrained=True,
+        mel_freq_bins=80,  # mel spectrogram 주파수 빈 수
+        mel_time_steps=mel_time_steps  # 실제 데이터 차원에 맞춤
     )
     model.to(device)
     

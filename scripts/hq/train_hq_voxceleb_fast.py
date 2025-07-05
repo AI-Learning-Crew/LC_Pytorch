@@ -231,20 +231,20 @@ def main():
                        help='InfoNCE 온도 파라미터')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=32,
-                       help='배치 크기 (기본값: 32)')
+    parser.add_argument('--batch_size', type=int, default=16,
+                       help='배치 크기 (기본값: 16)')
     parser.add_argument('--num_epochs', type=int, default=50,
                        help='학습 에포크 수 (기본값: 50)')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
                        help='학습률 (기본값: 1e-4)')
     parser.add_argument('--weight_decay', type=float, default=5e-4,
                        help='가중치 감쇠 (기본값: 5e-4)')
-    parser.add_argument('--num_workers', type=int, default=16,
-                       help='데이터 로딩 워커 수 (기본값: 16)')
-    parser.add_argument('--prefetch_factor', type=int, default=8,
-                       help='워커당 미리 로드할 배치 수 (기본값: 8)')
-    parser.add_argument('--cache_size', type=int, default=3000,
-                       help='데이터 캐시 크기 (기본값: 3000)')
+    parser.add_argument('--num_workers', type=int, default=8,
+                       help='데이터 로딩 워커 수 (기본값: 8)')
+    parser.add_argument('--prefetch_factor', type=int, default=4,
+                       help='워커당 미리 로드할 배치 수 (기본값: 4)')
+    parser.add_argument('--cache_size', type=int, default=1000,
+                       help='데이터 캐시 크기 (기본값: 1000)')
     parser.add_argument('--enable_parallel', action='store_true', default=True,
                        help='병렬 처리 활성화')
     

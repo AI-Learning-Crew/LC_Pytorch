@@ -1,5 +1,5 @@
 """
-HQ VoxCeleb 데이터셋을 위한 전용 데이터셋 클래스 (병렬 처리 최적화)
+HQ VoxCeleb 데이터셋을 위한 전용 데이터셋 클래스 (멀티프로세싱 최적화)
 """
 
 import os
@@ -17,13 +17,12 @@ import multiprocessing as mp
 from functools import lru_cache
 import pickle
 from typing import Dict, List, Tuple, Any
-import threading
 import time
 
 
 class HQVoxCelebDataset(Dataset):
     """
-    HQ VoxCeleb 데이터셋을 위한 데이터셋 클래스 (병렬 처리 최적화)
+    HQ VoxCeleb 데이터셋을 위한 데이터셋 클래스 (멀티프로세싱 최적화)
     
     데이터 구조:
     data/HQVoxCeleb/
@@ -58,11 +57,10 @@ class HQVoxCelebDataset(Dataset):
         self.enable_parallel = enable_parallel
         self.cache_size = cache_size
         
-        # 병렬 처리 활성화 시 캐시 및 동기화 객체
-        if self.enable_parallel:
-            self.cache = {}
-            self.cache_lock = threading.Lock()
-            self.access_count = {}
+        # 멀티프로세싱에서 pickle 불가능한 객체들을 제거
+        # 캐시는 각 워커에서 개별적으로 관리
+        self.cache = {}
+        self.access_count = {}
         
         # split.json 로드
         with open(split_json_path, 'r', encoding='utf-8') as f:
@@ -92,7 +90,9 @@ class HQVoxCelebDataset(Dataset):
         
         # 데이터 변환기 설정
         self.image_transform = self._get_image_transform()
-        self.audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
+        
+        # 오디오 프로세서는 필요할 때만 로드
+        self.audio_processor = None
         
         print(f"HQ VoxCeleb {split_type}: {len(self.file_pairs)}개 파일 쌍 {'(병렬 처리)' if enable_parallel else ''}")
     
@@ -229,6 +229,12 @@ class HQVoxCelebDataset(Dataset):
                                std=[0.229, 0.224, 0.225])
         ])
     
+    def _get_audio_processor(self):
+        """오디오 프로세서를 지연 로드합니다."""
+        if self.audio_processor is None:
+            self.audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
+        return self.audio_processor
+    
     def _load_mel_spectrogram(self, mel_path):
         """Mel spectrogram을 로드하고 처리합니다."""
         if mel_path.endswith('.pickle'):
@@ -266,36 +272,19 @@ class HQVoxCelebDataset(Dataset):
         image = Image.open(face_path).convert('RGB')
         return self.image_transform(image)
     
-    def _load_data_parallel(self, mel_path, face_path):
-        """병렬로 데이터 로드"""
-        if self.enable_parallel:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                mel_future = executor.submit(self._load_mel_spectrogram, mel_path)
-                face_future = executor.submit(self._load_face_image, face_path)
-                
-                mel = mel_future.result()
-                face = face_future.result()
-        else:
-            mel = self._load_mel_spectrogram(mel_path)
-            face = self._load_face_image(face_path)
-        
-        return mel, face
-    
     def __len__(self):
         return len(self.file_pairs)
     
     def __getitem__(self, idx):
-        # 병렬 처리 활성화 시 캐시 확인
-        if self.enable_parallel:
-            with self.cache_lock:
-                if idx in self.cache:
-                    self.access_count[idx] = self.access_count.get(idx, 0) + 1
-                    return self.cache[idx]
+        # 간단한 캐시 확인 (lock 없이)
+        if idx in self.cache:
+            return self.cache[idx]
         
         pair = self.file_pairs[idx]
         
-        # 데이터 로드 (병렬 처리 가능)
-        mel, face = self._load_data_parallel(pair['mel_path'], pair['face_path'])
+        # 데이터 로드
+        mel = self._load_mel_spectrogram(pair['mel_path'])
+        face = self._load_face_image(pair['face_path'])
         
         data = {
             'mel': mel,
@@ -303,18 +292,9 @@ class HQVoxCelebDataset(Dataset):
             'identity': pair['identity']
         }
         
-        # 병렬 처리 활성화 시 캐시에 저장
-        if self.enable_parallel:
-            with self.cache_lock:
-                if len(self.cache) >= self.cache_size:
-                    # LRU 캐시 정리
-                    if self.access_count:
-                        min_access_idx = min(self.access_count.items(), key=lambda x: x[1])[0]
-                        del self.cache[min_access_idx]
-                        del self.access_count[min_access_idx]
-                
-                self.cache[idx] = data
-                self.access_count[idx] = 1
+        # 캐시에 저장 (크기 제한)
+        if len(self.cache) < self.cache_size:
+            self.cache[idx] = data
         
         return data
 
@@ -348,7 +328,7 @@ def create_hq_voxceleb_dataloaders(split_json_path,
     
     # 시스템 최적화 설정
     if enable_parallel:
-        torch.set_num_threads(4)
+        torch.set_num_threads(2)  # 스레드 수 감소
     
     dataloaders = {}
     
@@ -363,7 +343,7 @@ def create_hq_voxceleb_dataloaders(split_json_path,
             cache_size=cache_size
         )
         
-        # 고성능 데이터로더 설정
+        # 멀티프로세싱 친화적 데이터로더 설정
         dataloaders[split_type] = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -373,7 +353,8 @@ def create_hq_voxceleb_dataloaders(split_json_path,
             persistent_workers=persistent_workers and num_workers > 0,
             prefetch_factor=prefetch_factor if num_workers > 0 else 2,
             drop_last=True,
-            timeout=300,  # 5분 타임아웃
+            timeout=120,  # 타임아웃 감소
+            multiprocessing_context='spawn',  # spawn 방식 사용
         )
     
     return dataloaders

@@ -111,12 +111,13 @@ class HQVoxCelebModel(nn.Module):
 
 class HQVoxCelebInfoNCELoss(nn.Module):
     """
-    HQ VoxCeleb를 위한 InfoNCE 손실 함수
+    HQ VoxCeleb를 위한 개선된 InfoNCE 손실 함수
     """
     
-    def __init__(self, temperature=0.07):
+    def __init__(self, temperature=0.1):
         super(HQVoxCelebInfoNCELoss, self).__init__()
-        self.temperature = temperature
+        # Temperature를 학습 가능한 파라미터로 설정
+        self.log_temperature = nn.Parameter(torch.log(torch.tensor(temperature)))
     
     def forward(self, face_embeddings, audio_embeddings):
         """
@@ -129,8 +130,11 @@ class HQVoxCelebInfoNCELoss(nn.Module):
         """
         batch_size = face_embeddings.shape[0]
         
-        # 코사인 유사도 계산
-        logits = torch.mm(face_embeddings, audio_embeddings.T) / self.temperature
+        # Temperature를 양수로 제한
+        temperature = torch.exp(self.log_temperature).clamp(min=0.01, max=1.0)
+        
+        # 코사인 유사도 계산 (정규화된 임베딩 사용)
+        logits = torch.mm(face_embeddings, audio_embeddings.T) / temperature
         
         # 대각선이 positive pair
         labels = torch.arange(batch_size, device=face_embeddings.device)

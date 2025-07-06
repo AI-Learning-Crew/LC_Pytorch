@@ -173,8 +173,8 @@ def train_model_fast(model, train_dataloader, val_dataloader, criterion, optimiz
     
     # 학습률 스케줄러 설정
     scheduler = ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, 
-        verbose=True, min_lr=1e-6
+        optimizer, mode='min', factor=0.7, patience=2, 
+        verbose=True, min_lr=1e-5
     )
     
     print(f"총 배치 수: 학습={len(train_dataloader)}, 검증={len(val_dataloader)}")
@@ -258,16 +258,16 @@ def main():
     # 모델 설정
     parser.add_argument('--embedding_dim', type=int, default=512,
                        help='임베딩 차원')
-    parser.add_argument('--temperature', type=float, default=0.07,
-                       help='InfoNCE 온도 파라미터')
+    parser.add_argument('--temperature', type=float, default=0.1,
+                       help='InfoNCE 온도 파라미터 (기본값: 0.1)')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=32,
-                       help='배치 크기 (기본값: 32)')
-    parser.add_argument('--num_epochs', type=int, default=10,
-                       help='학습 에포크 수 (기본값: 10)')
-    parser.add_argument('--learning_rate', type=float, default=2e-4,
-                       help='학습률 (기본값: 2e-4)')
+    parser.add_argument('--batch_size', type=int, default=64,
+                       help='배치 크기 (기본값: 64)')
+    parser.add_argument('--num_epochs', type=int, default=15,
+                       help='학습 에포크 수 (기본값: 15)')
+    parser.add_argument('--learning_rate', type=float, default=1e-3,
+                       help='학습률 (기본값: 1e-3)')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                        help='가중치 감쇠 (기본값: 1e-4)')
     parser.add_argument('--num_workers', type=int, default=0,
@@ -280,10 +280,10 @@ def main():
                        help='병렬 처리 활성화')
     
     # 정규화 설정
-    parser.add_argument('--patience', type=int, default=5,
-                       help='조기 종료 patience (기본값: 5)')
-    parser.add_argument('--grad_clip_norm', type=float, default=1.0,
-                       help='그래디언트 클리핑 노름 (기본값: 1.0)')
+    parser.add_argument('--patience', type=int, default=3,
+                       help='조기 종료 patience (기본값: 3)')
+    parser.add_argument('--grad_clip_norm', type=float, default=0.5,
+                       help='그래디언트 클리핑 노름 (기본값: 0.5)')
     
     # 오디오 설정
     parser.add_argument('--audio_duration_sec', type=int, default=1,
@@ -294,7 +294,7 @@ def main():
                        help='이미지 크기 (기본값: 224)')
     
     # 장치 설정
-    parser.add_argument('--device', type=str, default='auto',
+    parser.add_argument('--device', type=str, default='cuda',
                        choices=['auto', 'cpu', 'cuda'])
     parser.add_argument('--force_cpu', action='store_true')
     

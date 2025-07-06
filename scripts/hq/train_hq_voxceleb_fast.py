@@ -19,13 +19,22 @@ import sys
 from pathlib import Path
 import multiprocessing as mp
 
-# TensorFlow 충돌 방지
+# TensorFlow 충돌 방지 (더 강력한 설정)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # TensorFlow 경고 숨김
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'   # GPU 0만 사용
 
-# CUDA 경고 숨김
+# CUDA 경고 숨김 및 충돌 방지
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+
+# TensorFlow 완전 비활성화
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = '0'
+
+# cuDNN 충돌 방지
+os.environ['CUDNN_LOGINFO_DBG'] = '0'
+os.environ['CUDNN_LOGDEST_DBG'] = 'stdout'
 
 # 멀티프로세싱 시작 방법 설정
 if __name__ == '__main__':
@@ -59,6 +68,10 @@ os.environ['OMP_NUM_THREADS'] = '4'
 os.environ['MKL_NUM_THREADS'] = '4'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+
+# 추가 CUDA 충돌 방지
+os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
+os.environ['CUDA_CACHE_DISABLE'] = '0'
 
 def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoch, num_epochs, grad_clip_norm=1.0):
     """고속 학습을 위한 에포크 함수 (Mixed Precision Training 포함)"""
@@ -323,29 +336,26 @@ def main():
         # GPU 메모리 캐시 정리
         torch.cuda.empty_cache()
         
-        # 메모리 할당 전략 설정 (성능 최적화)
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
+        # 메모리 할당 전략 설정 (안전 모드)
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:64'
         
         # GPU 메모리 정보 출력
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
         print(f"GPU 메모리: {gpu_memory:.1f}GB")
         
-        # 성능 최적화 설정
-        torch.backends.cudnn.benchmark = True  # 성능 향상을 위해 True로 설정
-        torch.backends.cudnn.deterministic = False  # 성능 향상을 위해 False로 설정
-        torch.backends.cuda.matmul.allow_tf32 = True  # TF32 활성화 (속도 향상)
-        torch.backends.cudnn.allow_tf32 = True  # cuDNN TF32 활성화
+        # 성능 최적화 설정 (안전 모드)
+        torch.backends.cudnn.benchmark = False  # 안정성을 위해 False로 설정
+        torch.backends.cudnn.deterministic = True  # 안정성을 위해 True로 설정
+        torch.backends.cuda.matmul.allow_tf32 = False  # 안정성을 위해 False로 설정
+        torch.backends.cudnn.allow_tf32 = False  # 안정성을 위해 False로 설정
         
         # 메모리 할당 최적화 (안전 모드)
-        torch.cuda.set_per_process_memory_fraction(0.6)  # GPU 메모리의 60% 사용 (더 보수적)
+        torch.cuda.set_per_process_memory_fraction(0.5)  # GPU 메모리의 50% 사용 (더 보수적)
         
         # CUDA 스트림 최적화
         torch.cuda.synchronize()  # 초기 동기화
         
-        # 메모리 할당 전략 최적화 (안전 모드)
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:64'
-        
-        print("GPU 성능 최적화 설정 완료")
+        print("GPU 안전 모드 설정 완료")
     
     # 데이터 파일 검증
     if not os.path.exists(args.split_json_path):

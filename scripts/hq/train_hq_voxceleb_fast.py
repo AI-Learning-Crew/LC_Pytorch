@@ -173,8 +173,8 @@ def train_model_fast(model, train_dataloader, val_dataloader, criterion, optimiz
     
     # 학습률 스케줄러 설정
     scheduler = ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.7, patience=2, 
-        verbose=True, min_lr=1e-5
+        optimizer, mode='min', factor=0.8, patience=3, 
+        verbose=True, min_lr=1e-6
     )
     
     print(f"총 배치 수: 학습={len(train_dataloader)}, 검증={len(val_dataloader)}")
@@ -262,12 +262,12 @@ def main():
                        help='InfoNCE 온도 파라미터 (기본값: 0.1)')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=64,
-                       help='배치 크기 (기본값: 64)')
+    parser.add_argument('--batch_size', type=int, default=128,
+                       help='배치 크기 (기본값: 128)')
     parser.add_argument('--num_epochs', type=int, default=15,
                        help='학습 에포크 수 (기본값: 15)')
-    parser.add_argument('--learning_rate', type=float, default=1e-3,
-                       help='학습률 (기본값: 1e-3)')
+    parser.add_argument('--learning_rate', type=float, default=2e-4,
+                       help='학습률 (기본값: 2e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                        help='가중치 감쇠 (기본값: 1e-4)')
     parser.add_argument('--num_workers', type=int, default=0,

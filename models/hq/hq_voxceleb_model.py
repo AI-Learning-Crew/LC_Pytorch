@@ -64,8 +64,21 @@ class HQVoxCelebModel(nn.Module):
             nn.Linear(embedding_dim, embedding_dim)
         )
         
+        # 가중치 초기화
+        self._initialize_weights()
+        
         # L2 정규화를 위한 파라미터
         self.temperature = nn.Parameter(torch.ones([]) * 0.07)
+    
+    def _initialize_weights(self):
+        """가중치 초기화"""
+        for module in [self.face_projection, self.audio_projection]:
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    # Xavier 초기화
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
     
     def encode_face(self, face_images):
         """얼굴 이미지를 인코딩합니다."""
@@ -130,10 +143,14 @@ class HQVoxCelebInfoNCELoss(nn.Module):
         """
         batch_size = face_embeddings.shape[0]
         
-        # Temperature를 양수로 제한
-        temperature = torch.exp(self.log_temperature).clamp(min=0.01, max=1.0)
+        # 추가 정규화 (안정성 향상)
+        face_embeddings = F.normalize(face_embeddings, p=2, dim=1)
+        audio_embeddings = F.normalize(audio_embeddings, p=2, dim=1)
         
-        # 코사인 유사도 계산 (정규화된 임베딩 사용)
+        # Temperature를 양수로 제한 (더 넓은 범위)
+        temperature = torch.exp(self.log_temperature).clamp(min=0.05, max=2.0)
+        
+        # 코사인 유사도 계산
         logits = torch.mm(face_embeddings, audio_embeddings.T) / temperature
         
         # 대각선이 positive pair

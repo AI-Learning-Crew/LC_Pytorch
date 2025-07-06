@@ -41,7 +41,7 @@ sys.path.insert(0, str(project_root))
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from tqdm.auto import tqdm
 import json
 import time
@@ -171,10 +171,11 @@ def train_model_fast(model, train_dataloader, val_dataloader, criterion, optimiz
     has_validation = len(val_dataloader) > 0
     patience_counter = 0
     
-    # 학습률 스케줄러 설정
-    scheduler = ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.8, patience=3, 
-        verbose=True, min_lr=1e-6
+    # 학습률 스케줄러 설정 (Cosine Annealing + ReduceLROnPlateau 조합)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-7)
+    plateau_scheduler = ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=2, 
+        verbose=True, min_lr=1e-7, threshold=1e-4
     )
     
     print(f"총 배치 수: 학습={len(train_dataloader)}, 검증={len(val_dataloader)}")
@@ -198,10 +199,13 @@ def train_model_fast(model, train_dataloader, val_dataloader, criterion, optimiz
             val_loss = validate_epoch_fast(model, val_dataloader, criterion, 
                                           device, epoch, num_epochs)
             
-            # 학습률 스케줄러 업데이트
-            scheduler.step(val_loss)
+            # 학습률 스케줄러 업데이트 (Cosine Annealing은 매 에포크마다, Plateau는 검증 손실 기반)
+            cosine_scheduler.step()
+            plateau_scheduler.step(val_loss)
         else:
             val_loss = float('inf')
+            # 검증이 없으면 Cosine Annealing만 사용
+            cosine_scheduler.step()
         
         epoch_time = time.time() - start_time
         
@@ -213,7 +217,7 @@ def train_model_fast(model, train_dataloader, val_dataloader, criterion, optimiz
         if has_validation:
             print(f'Epoch {epoch+1}/{num_epochs} ({epoch_time:.1f}s): '
                   f'Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, '
-                  f'LR: {current_lr:.2e}')
+                  f'LR: {current_lr:.2e}, Best: {best_val_loss:.4f}')
         else:
             print(f'Epoch {epoch+1}/{num_epochs} ({epoch_time:.1f}s): '
                   f'Train Loss: {train_loss:.4f}, LR: {current_lr:.2e}')
@@ -264,12 +268,12 @@ def main():
     # 병렬 처리 최적화 설정
     parser.add_argument('--batch_size', type=int, default=32,
                        help='배치 크기 (기본값: 32)')
-    parser.add_argument('--num_epochs', type=int, default=15,
-                       help='학습 에포크 수 (기본값: 15)')
-    parser.add_argument('--learning_rate', type=float, default=2e-4,
-                       help='학습률 (기본값: 2e-4)')
-    parser.add_argument('--weight_decay', type=float, default=1e-4,
-                       help='가중치 감쇠 (기본값: 1e-4)')
+    parser.add_argument('--num_epochs', type=int, default=20,
+                       help='학습 에포크 수 (기본값: 20)')
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                       help='학습률 (기본값: 1e-4)')
+    parser.add_argument('--weight_decay', type=float, default=5e-4,
+                       help='가중치 감쇠 (기본값: 5e-4)')
     parser.add_argument('--num_workers', type=int, default=0,
                        help='데이터 로딩 워커 수 (0=메인 프로세스, 기본값: 0)')
     parser.add_argument('--prefetch_factor', type=int, default=2,
@@ -280,10 +284,10 @@ def main():
                        help='병렬 처리 활성화')
     
     # 정규화 설정
-    parser.add_argument('--patience', type=int, default=3,
-                       help='조기 종료 patience (기본값: 3)')
-    parser.add_argument('--grad_clip_norm', type=float, default=0.5,
-                       help='그래디언트 클리핑 노름 (기본값: 0.5)')
+    parser.add_argument('--patience', type=int, default=5,
+                       help='조기 종료 patience (기본값: 5)')
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0,
+                       help='그래디언트 클리핑 노름 (기본값: 1.0)')
     
     # 오디오 설정
     parser.add_argument('--audio_duration_sec', type=int, default=1,
@@ -351,16 +355,19 @@ def main():
     # 병렬 처리 최적화된 데이터로더 생성
     print("병렬 처리 최적화된 데이터로더 생성 중...")
     
-    # 성능 최적화를 위한 설정 (단일 프로세스 안정성)
-    # 워커 수를 0으로 고정 (안정성 우선)
-    safe_num_workers = 0  # 항상 단일 프로세스
-    persistent_workers = False  # 단일 프로세스에서는 항상 False
-    pin_memory = False  # 단일 프로세스에서는 pin_memory 비활성화
+    # 성능 최적화를 위한 설정 (GPU 사용 시 최적화)
+    if device.type == 'cuda':
+        safe_num_workers = 2  # GPU 사용 시 2개 워커로 최적화
+        persistent_workers = True  # 워커 재사용으로 성능 향상
+        pin_memory = True  # GPU 메모리 전송 최적화
+        prefetch_factor = 2
+    else:
+        safe_num_workers = 0  # CPU 사용 시 단일 프로세스
+        persistent_workers = False
+        pin_memory = False
+        prefetch_factor = None
     
-    print(f"데이터로더 설정: 워커={safe_num_workers} (단일 프로세스), persistent_workers={persistent_workers}, pin_memory={pin_memory}")
-    
-    # 단일 프로세스에서는 prefetch_factor를 None으로 설정
-    prefetch_factor = None
+    print(f"데이터로더 설정: 워커={safe_num_workers}, persistent_workers={persistent_workers}, pin_memory={pin_memory}")
     
     dataloaders = create_hq_voxceleb_dataloaders(
         split_json_path=args.split_json_path,

@@ -365,19 +365,13 @@ def main():
     # 병렬 처리 최적화된 데이터로더 생성
     print("병렬 처리 최적화된 데이터로더 생성 중...")
     
-    # 성능 최적화를 위한 설정 (GPU 사용 시 최적화)
-    if device.type == 'cuda':
-        safe_num_workers = 2  # GPU 사용 시 2개 워커로 최적화
-        persistent_workers = True  # 워커 재사용으로 성능 향상
-        pin_memory = True  # GPU 메모리 전송 최적화
-        prefetch_factor = 2
-    else:
-        safe_num_workers = 0  # CPU 사용 시 단일 프로세스
-        persistent_workers = False
-        pin_memory = False
-        prefetch_factor = None
+    # 워커 0으로 고정 (안정성 우선)
+    safe_num_workers = 0  # 항상 단일 프로세스
+    persistent_workers = False  # 단일 프로세스에서는 항상 False
+    pin_memory = False  # 단일 프로세스에서는 pin_memory 비활성화
+    prefetch_factor = None  # 단일 프로세스에서는 prefetch_factor None
     
-    print(f"데이터로더 설정: 워커={safe_num_workers}, persistent_workers={persistent_workers}, pin_memory={pin_memory}")
+    print(f"데이터로더 설정: 워커={safe_num_workers} (단일 프로세스), persistent_workers={persistent_workers}, pin_memory={pin_memory}")
     
     dataloaders = create_hq_voxceleb_dataloaders(
         split_json_path=args.split_json_path,

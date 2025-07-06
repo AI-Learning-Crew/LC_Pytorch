@@ -104,8 +104,8 @@ def train_epoch_fast(model, train_dataloader, criterion, optimizer, device, epoc
                 'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
             })
             
-            # 메모리 정리 (매 50배치마다 - 메모리 부족 방지)
-            if batch_idx % 50 == 0 and device.type == 'cuda':
+            # 메모리 정리 (매 10배치마다 - 메모리 부족 방지)
+            if batch_idx % 10 == 0 and device.type == 'cuda':
                 torch.cuda.empty_cache()
                 
         except Exception as e:
@@ -151,8 +151,8 @@ def validate_epoch_fast(model, val_dataloader, criterion, device, epoch, num_epo
                     'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
                 })
                 
-                # 메모리 정리 (매 20배치마다 - 메모리 부족 방지)
-                if batch_idx % 20 == 0 and device.type == 'cuda':
+                # 메모리 정리 (매 10배치마다 - 메모리 부족 방지)
+                if batch_idx % 10 == 0 and device.type == 'cuda':
                     torch.cuda.empty_cache()
                     
             except Exception as e:
@@ -262,8 +262,8 @@ def main():
                        help='InfoNCE 온도 파라미터 (기본값: 0.1)')
     
     # 병렬 처리 최적화 설정
-    parser.add_argument('--batch_size', type=int, default=128,
-                       help='배치 크기 (기본값: 128)')
+    parser.add_argument('--batch_size', type=int, default=32,
+                       help='배치 크기 (기본값: 32)')
     parser.add_argument('--num_epochs', type=int, default=15,
                        help='학습 에포크 수 (기본값: 15)')
     parser.add_argument('--learning_rate', type=float, default=2e-4,
@@ -333,13 +333,13 @@ def main():
         torch.backends.cudnn.allow_tf32 = True  # cuDNN TF32 활성화
         
         # 메모리 할당 최적화 (안전 모드)
-        torch.cuda.set_per_process_memory_fraction(0.8)  # GPU 메모리의 80% 사용 (안전 마진)
+        torch.cuda.set_per_process_memory_fraction(0.6)  # GPU 메모리의 60% 사용 (더 보수적)
         
         # CUDA 스트림 최적화
         torch.cuda.synchronize()  # 초기 동기화
         
         # 메모리 할당 전략 최적화 (안전 모드)
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:64'
         
         print("GPU 성능 최적화 설정 완료")
     

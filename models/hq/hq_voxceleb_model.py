@@ -64,8 +64,21 @@ class HQVoxCelebModel(nn.Module):
             nn.Linear(embedding_dim, embedding_dim)
         )
         
+        # 가중치 초기화
+        self._initialize_weights()
+        
         # L2 정규화를 위한 파라미터
         self.temperature = nn.Parameter(torch.ones([]) * 0.07)
+    
+    def _initialize_weights(self):
+        """가중치 초기화"""
+        for module in [self.face_projection, self.audio_projection]:
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    # Xavier 초기화
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
     
     def encode_face(self, face_images):
         """얼굴 이미지를 인코딩합니다."""
@@ -111,12 +124,13 @@ class HQVoxCelebModel(nn.Module):
 
 class HQVoxCelebInfoNCELoss(nn.Module):
     """
-    HQ VoxCeleb를 위한 InfoNCE 손실 함수
+    HQ VoxCeleb를 위한 개선된 InfoNCE 손실 함수
     """
     
-    def __init__(self, temperature=0.07):
+    def __init__(self, temperature=0.1):
         super(HQVoxCelebInfoNCELoss, self).__init__()
-        self.temperature = temperature
+        # Temperature를 학습 가능한 파라미터로 설정
+        self.log_temperature = nn.Parameter(torch.log(torch.tensor(temperature)))
     
     def forward(self, face_embeddings, audio_embeddings):
         """
@@ -129,8 +143,15 @@ class HQVoxCelebInfoNCELoss(nn.Module):
         """
         batch_size = face_embeddings.shape[0]
         
+        # 추가 정규화 (안정성 향상)
+        face_embeddings = F.normalize(face_embeddings, p=2, dim=1)
+        audio_embeddings = F.normalize(audio_embeddings, p=2, dim=1)
+        
+        # Temperature를 양수로 제한 (더 넓은 범위)
+        temperature = torch.exp(self.log_temperature).clamp(min=0.05, max=2.0)
+        
         # 코사인 유사도 계산
-        logits = torch.mm(face_embeddings, audio_embeddings.T) / self.temperature
+        logits = torch.mm(face_embeddings, audio_embeddings.T) / temperature
         
         # 대각선이 positive pair
         labels = torch.arange(batch_size, device=face_embeddings.device)

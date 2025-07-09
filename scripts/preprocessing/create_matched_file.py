@@ -19,7 +19,7 @@ import sys, os
 from pathlib import Path
 
 # 프로젝트 루트를 Python 경로에 추가하여 모듈 import 가능하게 함
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from utils.matched_file_utils import load_id_list_from_json, save_matched_files_by_index
 
 import argparse

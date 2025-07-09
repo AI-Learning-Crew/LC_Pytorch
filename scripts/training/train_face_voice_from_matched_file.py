@@ -138,13 +138,6 @@ def main():
     args = parser.parse_args()
     
     # 디렉토리 확인
-    if not os.path.exists(args.image_folder):
-        print(f"오류: 이미지 폴더 '{args.image_folder}'가 존재하지 않습니다.")
-        return 1
-    
-    if not os.path.exists(args.audio_folder):
-        print(f"오류: 오디오 폴더 '{args.audio_folder}'가 존재하지 않습니다.")
-        return 1
     
     # 장치 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

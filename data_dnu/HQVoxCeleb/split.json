@@ -1,0 +1,17 @@
+{
+  "vox1": {
+    "train": [
+      "Aamir_Khan"
+    ],
+    "val": [],
+    "test": []
+  },
+  "vox2": {
+    "train": [
+      "Aaron_Ashmore",
+      "Lee_Dong-gun"
+    ],
+    "val": [],
+    "test": []
+  }
+}

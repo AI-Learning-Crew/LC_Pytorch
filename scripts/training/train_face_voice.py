@@ -32,7 +32,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, 
+def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, scheduler,
                 device, num_epochs, save_dir):
     """
     모델 학습
@@ -93,8 +93,17 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
         
         val_loss /= len(val_dataloader)
         history['val_loss'].append(val_loss)
-        
-        print(f'Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+
+        # 매 에포크가 끝난 후 스케줄러의 step()을 호출하여 학습률을 업데이트합니다.
+        scheduler.step()
+
+        # 스케줄러에서 모든 그룹의 학습률 리스트를 가져옵니다.
+        lrs = scheduler.get_last_lr() 
+
+        # [수정] 각 학습률이 어떤 그룹에 해당하는지 명시하는 문자열을 생성합니다.
+        lr_info = (f"Pretrained: {lrs[0]:.7f}, "
+                   f"Projection: {lrs[1]:.7f}")
+        print(f"Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LRs: [{lr_info}]")
         
         # 모델 저장 (매 에포크마다)
         save_model_components(model, save_dir)
@@ -124,8 +133,11 @@ def main():
                        help='배치 크기 (기본값: 32)')
     parser.add_argument('--num_epochs', type=int, default=100,
                        help='학습 에포크 수 (기본값: 100)')
-    parser.add_argument('--learning_rate', type=float, default=1e-4,
-                       help='학습률 (기본값: 1e-4)')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, 
+                        help='(신규 레이어용) 기본 학습률 (기본값: 1e-3)')
+    # 사전 학습된 모델을 위한 학습률 인자
+    parser.add_argument('--pretrained_lr', type=float, default=1e-5, 
+                        help='사전 학습된 레이어의 학습률 (기본값: 1e-5)')
     parser.add_argument('--test_size', type=float, default=0.2,
                        help='테스트 데이터 비율 (기본값: 0.2)')
     parser.add_argument('--random_state', type=int, default=42,
@@ -231,7 +243,32 @@ def main():
     
     # 손실 함수 및 옵티마이저
     criterion = InfoNCELoss(temperature=args.temperature)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    # 차등 학습률을 적용한 옵티마이저 생성
+    # 파라미터 그룹 분리
+    # FaceVoiceModel의 구조에 따라 파라미터를 두 그룹으로 나눕니다.
+    # 사전 학습된 인코더(ViT, Wav2Vec2) 파라미터
+    pretrained_params = list(model.image_encoder.parameters()) + list(model.audio_encoder.parameters())
+    # 처음부터 학습해야 하는 프로젝션 레이어 파라미터
+    projection_params = list(model.image_projection.parameters()) + list(model.audio_projection.parameters())
+
+    # 각 그룹에 다른 학습률을 설정하여 옵티마이저 생성
+    optimizer = torch.optim.AdamW([
+        {'params': pretrained_params, 'lr': args.pretrained_lr},  # 사전 학습된 부분은 낮은 학습률로 미세 조정
+        {'params': projection_params, 'lr': args.learning_rate}   # 새로 추가된 부분은 상대적으로 높은 학습률로 빠르게 학습
+    ])
+
+    print(f"사전 학습된 레이어 학습률: {optimizer.param_groups[0]['lr']}")
+    print(f"프로젝션 레이어 학습률: {optimizer.param_groups[1]['lr']}")
+
+    # 학습률 스케줄러 생성
+    # 코사인 어닐링 스케줄러는 학습률을 점진적으로 감소시켜 안정적인 수렴을 돕는 효과적인 방법입니다.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, 
+        T_max=args.num_epochs, # 전체 에포크 수
+        eta_min=1e-7          # 도달할 최소 학습률
+    )
+    print("코사인 어닐링 학습률 스케줄러가 추가되었습니다.")
+
     
     # 모델 저장 디렉토리 생성
     os.makedirs(args.save_dir, exist_ok=True)
@@ -240,7 +277,8 @@ def main():
     print("학습 시작...")
     history = train_model(
         model, train_dataloader, test_dataloader, 
-        criterion, optimizer, device, args.num_epochs, args.save_dir
+        criterion, optimizer, scheduler,
+        device, args.num_epochs, args.save_dir
     )
     
     print(f"학습 완료! 모델이 '{args.save_dir}'에 저장되었습니다.")

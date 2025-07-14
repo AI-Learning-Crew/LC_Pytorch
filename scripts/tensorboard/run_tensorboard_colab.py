@@ -43,6 +43,8 @@ def install_required_packages():
     
     print("✅ 패키지 설치 완료")
 
+
+
 def run_tensorboard(log_dir, port=6006, host="0.0.0.0"):
     """TensorBoard 실행"""
     print(f"📊 TensorBoard 실행 중... (로그 디렉토리: {log_dir}, 포트: {port})")
@@ -71,6 +73,27 @@ def run_tensorboard(log_dir, port=6006, host="0.0.0.0"):
     time.sleep(3)
     print("✅ TensorBoard 실행 완료")
 
+def display_tensorboard_colab(port=6006):
+    """Colab에서 TensorBoard 화면 표시"""
+    if not is_colab():
+        return
+    
+    print("🖥️  TensorBoard 화면 표시 중...")
+    try:
+        # TensorBoard extension 로드
+        get_ipython().run_line_magic('load_ext', 'tensorboard')
+        print("✅ TensorBoard extension 로드 완료")
+        
+        # TensorBoard 실행 및 화면 표시
+        get_ipython().run_line_magic('tensorboard', f'--logdir ./output --port {port}')
+        print("✅ TensorBoard 화면 표시 완료")
+    except Exception as e:
+        print(f"⚠️  TensorBoard 화면 표시 실패: {e}")
+        print("💡 수동으로 접속: http://localhost:6006")
+        print("💡 또는 다음 명령어를 코랩 셀에서 직접 실행하세요:")
+        print("   %load_ext tensorboard")
+        print(f"   %tensorboard --logdir ./output --port {port}")
+
 def main():
     parser = argparse.ArgumentParser(description="TensorBoard 실행 (Colab 지원)")
     parser.add_argument("--log_dir", type=str, default="./output", 
@@ -81,6 +104,8 @@ def main():
                        help="작업 디렉토리 변경 (선택사항)")
     parser.add_argument("--mount_drive", action="store_true",
                        help="구글 드라이브 마운트 (Colab에서만)")
+    parser.add_argument("--display", action="store_true",
+                       help="Colab에서 TensorBoard 화면 표시 (기본적으로 자동 활성화)")
     
     args = parser.parse_args()
     
@@ -109,18 +134,22 @@ def main():
     # 5. TensorBoard 실행
     run_tensorboard(args.log_dir, args.port)
     
+    # 6. Colab에서 화면 표시 (자동으로 활성화)
+    if is_colab():
+        display_tensorboard_colab(args.port)
+    
     print("\n" + "=" * 50)
     print("🎉 TensorBoard 실행 완료!")
     
     if is_colab():
         print(f"💡 Colab에서 접속: http://localhost:{args.port}")
-        print("💡 또는 Colab 노트북의 출력에서 TensorBoard 링크를 클릭하세요")
+        print("💡 TensorBoard 화면이 자동으로 표시됩니다")
     else:
         print(f"💡 브라우저에서 접속: http://localhost:{args.port}")
     
     print("=" * 50)
     
-    # 6. 무한 대기 (TensorBoard가 계속 실행되도록)
+    # 7. 무한 대기 (TensorBoard가 계속 실행되도록)
     try:
         print("⏳ TensorBoard가 실행 중입니다. 중단하려면 Ctrl+C를 누르세요...")
         while True:

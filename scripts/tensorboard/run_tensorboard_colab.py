@@ -41,6 +41,10 @@ def install_required_packages():
     # TensorBoard 설치
     os.system("pip install -q tensorboard")
     
+    # IPython 설치 (Colab에서 필요)
+    if is_colab():
+        os.system("pip install -q ipython")
+    
     print("✅ 패키지 설치 완료")
 
 
@@ -80,12 +84,19 @@ def display_tensorboard_colab(port=6006):
     
     print("🖥️  TensorBoard 화면 표시 중...")
     try:
+        # IPython 가져오기
+        from IPython import get_ipython
+        ipython = get_ipython()
+        
+        if ipython is None:
+            raise Exception("IPython 환경이 아닙니다")
+        
         # TensorBoard extension 로드
-        get_ipython().run_line_magic('load_ext', 'tensorboard')
+        ipython.run_line_magic('load_ext', 'tensorboard')
         print("✅ TensorBoard extension 로드 완료")
         
         # TensorBoard 실행 및 화면 표시
-        get_ipython().run_line_magic('tensorboard', f'--logdir ./output --port {port}')
+        ipython.run_line_magic('tensorboard', f'--logdir ./output --port {port}')
         print("✅ TensorBoard 화면 표시 완료")
     except Exception as e:
         print(f"⚠️  TensorBoard 화면 표시 실패: {e}")

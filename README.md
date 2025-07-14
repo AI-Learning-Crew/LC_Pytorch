@@ -7,6 +7,7 @@
 - **얼굴 추출**: 비디오에서 얼굴 자동 추출 및 중복 제거
 - **얼굴-음성 매칭**: ViT + Wav2Vec2 기반 contrastive learning
 - **모델 평가**: Top-K 정확도, ROC-AUC 등 성능 지표
+- **학습 모니터링**: TensorBoard를 통한 실시간 학습 과정 시각화
 
 ## 설치
 
@@ -26,7 +27,7 @@ LC_PyTorch/
 │   │   ├── deduplicate_faces.py      # 얼굴 중복 제거
 │   │   └── create_matched_file.py    # 매칭 파일 생성
 │   ├── training/      # 모델 학습
-│   │   ├── train_face_voice.py       # 일반 학습
+│   │   ├── train_face_voice.py       # 일반 학습 (TensorBoard 지원)
 │   │   └── train_face_voice_from_matched_file.py  # 매칭 파일 기반 학습
 │   └── evaluation/    # 모델 평가
 │       └── evaluate_face_voice.py    # 모델 성능 평가
@@ -89,7 +90,7 @@ python scripts/preprocessing/create_matched_file.py \
 
 ### 4. 모델 학습
 
-**일반 학습:**
+**일반 학습 (TensorBoard 지원):**
 ```bash
 python scripts/training/train_face_voice.py \
     --image_folder /path/to/images \
@@ -98,6 +99,28 @@ python scripts/training/train_face_voice.py \
     --batch_size 32 \
     --num_epochs 100 \
     --learning_rate 1e-4
+```
+
+**커스텀 TensorBoard 디렉토리 지정:**
+```bash
+python scripts/training/train_face_voice.py \
+    --image_folder /path/to/images \
+    --audio_folder /path/to/audio \
+    --save_dir /path/to/save \
+    --tensorboard_dir /path/to/tensorboard_logs \
+    --batch_size 32 \
+    --num_epochs 100
+```
+
+**TensorBoard 비활성화:**
+```bash
+python scripts/training/train_face_voice.py \
+    --image_folder /path/to/images \
+    --audio_folder /path/to/audio \
+    --save_dir /path/to/save \
+    --no_tensorboard \
+    --batch_size 32 \
+    --num_epochs 100
 ```
 
 **매칭 파일 기반 학습:**
@@ -122,8 +145,30 @@ python scripts/training/train_face_voice_from_matched_file.py \
 - `--test_size`: 테스트 데이터 비율 (기본값: 0.2)
 - `--audio_duration_sec`: 오디오 길이 (초, 기본값: 5)
 - `--target_sr`: 오디오 샘플링 레이트 (기본값: 16000)
+- `--tensorboard_dir`: TensorBoard 로그 디렉토리 (기본값: save_dir/runs)
+- `--no_tensorboard`: TensorBoard 로깅 비활성화
 
-### 5. 모델 평가
+### 5. TensorBoard 모니터링
+
+학습 중 실시간으로 모델 성능을 모니터링하려면:
+
+```bash
+# TensorBoard 실행
+tensorboard --logdir=/path/to/tensorboard_logs
+
+# 또는 기본 로그 디렉토리 사용
+tensorboard --logdir=/path/to/save/runs
+```
+
+**모니터링 가능한 메트릭:**
+- **Loss/Train_Batch**: 배치별 학습 손실
+- **Loss/Train_Epoch**: 에포크별 평균 학습 손실
+- **Loss/Val_Epoch**: 에포크별 검증 손실
+- **Learning_Rate**: 학습률 변화
+- **Parameters/**: 모델 파라미터 분포 (10 에포크마다)
+- **Gradients/**: 그래디언트 분포 (10 에포크마다)
+
+### 6. 모델 평가
 
 ```bash
 python scripts/evaluation/evaluate_face_voice.py \
@@ -152,4 +197,15 @@ python scripts/evaluation/evaluate_face_voice.py \
 - **음성 인코더**: Wav2Vec2-Base
 - **손실 함수**: InfoNCE Loss
 - **임베딩 차원**: 512 (기본값)
+
+## 학습 모니터링
+
+이 프로젝트는 TensorBoard를 통한 실시간 학습 모니터링을 지원합니다:
+
+- **실시간 손실 추적**: 배치별 및 에포크별 손실 변화
+- **학습률 모니터링**: 학습률 스케줄링 효과 확인
+- **모델 파라미터 분석**: 파라미터 및 그래디언트 분포 시각화
+- **성능 비교**: 여러 실험 결과 비교 분석
+
+TensorBoard를 통해 학습 과정을 시각적으로 확인하여 모델 성능을 최적화할 수 있습니다.
 

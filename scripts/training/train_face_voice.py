@@ -7,6 +7,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from datetime import datetime
 
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent.parent.parent
@@ -15,6 +16,7 @@ sys.path.insert(0, str(project_root))
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 from tqdm.auto import tqdm
 
@@ -33,7 +35,7 @@ except ImportError as e:
 
 
 def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, 
-                device, num_epochs, save_dir):
+                device, num_epochs, save_dir, tensorboard_dir=None):
     """
     모델 학습
     
@@ -46,11 +48,21 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
         device: 계산 장치
         num_epochs: 학습 에포크 수
         save_dir: 모델 저장 디렉토리
+        tensorboard_dir: TensorBoard 로그 디렉토리
         
     Returns:
         학습 히스토리
     """
     history = {'train_loss': [], 'val_loss': []}
+    
+    # TensorBoard 설정
+    writer = None
+    if tensorboard_dir:
+        writer = SummaryWriter(tensorboard_dir)
+        print(f"TensorBoard 로그가 '{tensorboard_dir}'에 저장됩니다.")
+        print(f"TensorBoard를 실행하려면: tensorboard --logdir={tensorboard_dir}")
+    
+    global_step = 0
     
     for epoch in range(num_epochs):
         # 학습 모드
@@ -58,7 +70,7 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
         train_loss = 0.0
         
         train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
-        for images, audios in train_pbar:
+        for batch_idx, (images, audios) in enumerate(train_pbar):
             images, audios = images.to(device), audios.to(device)
             
             # 순전파
@@ -72,6 +84,12 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
             
             train_loss += loss.item()
             train_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+            
+            # TensorBoard에 배치별 손실 기록
+            if writer:
+                writer.add_scalar('Loss/Train_Batch', loss.item(), global_step)
+            
+            global_step += 1
         
         train_loss /= len(train_dataloader)
         history['train_loss'].append(train_loss)
@@ -96,8 +114,30 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
         
         print(f'Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
         
+        # TensorBoard에 에포크별 메트릭 기록
+        if writer:
+            writer.add_scalar('Loss/Train_Epoch', train_loss, epoch)
+            writer.add_scalar('Loss/Val_Epoch', val_loss, epoch)
+            
+            # 학습률 기록
+            for param_group in optimizer.param_groups:
+                writer.add_scalar('Learning_Rate', param_group['lr'], epoch)
+            
+            # 모델 파라미터 분포 히스토그램 (매 10 에포크마다)
+            if (epoch + 1) % 10 == 0:
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        writer.add_histogram(f'Parameters/{name}', param.data, epoch)
+                        if param.grad is not None:
+                            writer.add_histogram(f'Gradients/{name}', param.grad, epoch)
+        
         # 모델 저장 (매 에포크마다)
         save_model_components(model, save_dir)
+    
+    # TensorBoard 종료
+    if writer:
+        writer.close()
+        print(f"TensorBoard 로그가 '{tensorboard_dir}'에 저장되었습니다.")
     
     return history
 
@@ -143,6 +183,12 @@ def main():
     parser.add_argument('--matched_files_path', type=str, default=None,
                        help='이미 매칭된 파일 목록이 저장된 경로 (JSON 파일)')
     
+    # TensorBoard 설정
+    parser.add_argument('--tensorboard_dir', type=str, default=None,
+                       help='TensorBoard 로그 디렉토리 (기본값: save_dir/runs)')
+    parser.add_argument('--no_tensorboard', action='store_true',
+                       help='TensorBoard 로깅을 비활성화합니다')
+    
     args = parser.parse_args()
     
     # 디렉토리 확인
@@ -157,6 +203,18 @@ def main():
     # 장치 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"사용 장치: {device}")
+    
+    # TensorBoard 디렉토리 설정
+    tensorboard_dir = None
+    if not args.no_tensorboard:
+        if args.tensorboard_dir:
+            tensorboard_dir = args.tensorboard_dir
+        else:
+            # 기본 TensorBoard 디렉토리 생성
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            tensorboard_dir = os.path.join(args.save_dir, 'runs', f'train_{timestamp}')
+        
+        os.makedirs(tensorboard_dir, exist_ok=True)
     
     # 데이터 변환기 생성
     image_transform, processor = create_data_transforms()
@@ -240,10 +298,13 @@ def main():
     print("학습 시작...")
     history = train_model(
         model, train_dataloader, test_dataloader, 
-        criterion, optimizer, device, args.num_epochs, args.save_dir
+        criterion, optimizer, device, args.num_epochs, args.save_dir, tensorboard_dir
     )
     
     print(f"학습 완료! 모델이 '{args.save_dir}'에 저장되었습니다.")
+    if tensorboard_dir:
+        print(f"TensorBoard 로그가 '{tensorboard_dir}'에 저장되었습니다.")
+        print(f"TensorBoard를 실행하려면: tensorboard --logdir={tensorboard_dir}")
     return 0
 
 

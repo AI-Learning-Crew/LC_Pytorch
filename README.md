@@ -153,11 +153,8 @@ python scripts/training/train_face_voice_from_matched_file.py \
 학습 중 실시간으로 모델 성능을 모니터링하려면:
 
 ```bash
-# TensorBoard 실행
-tensorboard --logdir=/path/to/tensorboard_logs
-
-# 또는 기본 로그 디렉토리 사용
-tensorboard --logdir=/path/to/save/runs
+# TensorBoard 실행 스크립트 사용
+python scripts/tensorboard/run_tensorboard_colab.py --log_dir /path/to/logs
 ```
 
 **모니터링 가능한 메트릭:**

@@ -98,7 +98,8 @@ python scripts/training/train_face_voice.py \
     --save_dir /path/to/save \
     --batch_size 32 \
     --num_epochs 100 \
-    --learning_rate 1e-4
+    --learning_rate 1e-3
+    --pretrained_lr 1e-5
 ```
 
 **커스텀 TensorBoard 디렉토리 지정:**
@@ -141,12 +142,13 @@ python scripts/training/train_face_voice_from_matched_file.py \
 - `--temperature`: InfoNCE 온도 파라미터 (기본값: 0.07)
 - `--batch_size`: 배치 크기 (기본값: 32)
 - `--num_epochs`: 학습 에포크 수 (기본값: 100)
-- `--learning_rate`: 학습률 (기본값: 1e-4)
+- `--learning_rate`: 신규 레이어용 기본 학습률 (기본값: 1e-3)
 - `--test_size`: 테스트 데이터 비율 (기본값: 0.2)
 - `--audio_duration_sec`: 오디오 길이 (초, 기본값: 5)
 - `--target_sr`: 오디오 샘플링 레이트 (기본값: 16000)
 - `--tensorboard_dir`: TensorBoard 로그 디렉토리 (기본값: save_dir/runs)
 - `--no_tensorboard`: TensorBoard 로깅 비활성화
+- `--pretrained_lr`: 사전 학습된 레이어의 학습률 (기본값: 1e-5)
 
 ### 5. TensorBoard 모니터링
 

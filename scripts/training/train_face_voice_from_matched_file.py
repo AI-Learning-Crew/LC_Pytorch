@@ -146,7 +146,7 @@ def main():
     # 데이터 변환기 생성
     image_transform, processor = create_data_transforms()
     
-    # 파일 매칭 (선택적)
+    # 파일 매칭
     if not os.path.exists(args.matched_file):
         print(f"오류: 매칭된 파일 '{args.matched_file}'가 존재하지 않습니다.")
         return 1

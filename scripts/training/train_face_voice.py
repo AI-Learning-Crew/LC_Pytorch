@@ -45,7 +45,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
-                device, num_epochs, save_dir, tensorboard_dir=None):
+                scheduler, device, num_epochs, save_dir, tensorboard_dir=None):
     """
     모델 학습
 

@@ -67,6 +67,11 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, s
             # 역전파
             optimizer.zero_grad()
             loss.backward()
+            
+            # 그래디언트 클리핑 (안정성 향상)
+            if args.grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
+            
             optimizer.step()
             
             train_loss += loss.item()
@@ -156,14 +161,16 @@ def main():
                        help='InfoNCE 온도 파라미터 (기본값: 0.1)')
     
     # 학습 설정
-    parser.add_argument('--batch_size', type=int, default=32,
-                       help='배치 크기 (기본값: 32)')
+    parser.add_argument('--batch_size', type=int, default=16,
+                       help='배치 크기 (기본값: 16)')
     parser.add_argument('--num_epochs', type=int, default=100,
                        help='학습 에포크 수 (기본값: 100)')
-    parser.add_argument('--learning_rate', type=float, default=3e-4,
-                       help='학습률 (기본값: 3e-4)')
+    parser.add_argument('--learning_rate', type=float, default=5e-4,
+                       help='학습률 (기본값: 5e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                        help='가중치 감쇠 (기본값: 1e-4)')
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0,
+                       help='그래디언트 클리핑 노름 (기본값: 1.0)')
     parser.add_argument('--test_size', type=float, default=0.2,
                        help='테스트 데이터 비율 (기본값: 0.2)')
     parser.add_argument('--random_state', type=int, default=42,
@@ -289,9 +296,9 @@ def main():
     criterion = InfoNCELoss(temperature=args.temperature)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     
-    # 학습률 스케줄러 추가
+    # 학습률 스케줄러 추가 (더 적극적인 스케줄링)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+        optimizer, mode='min', factor=0.3, patience=3, verbose=True, min_lr=1e-6
     )
     
     # 모델 저장 디렉토리 생성

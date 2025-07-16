@@ -7,6 +7,8 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import random
+import numpy as np
 
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent.parent.parent
@@ -30,6 +32,15 @@ except ImportError as e:
     print("프로젝트 루트에서 스크립트를 실행해주세요:")
     print(f"python scripts/train_face_voice.py [인자들]")
     sys.exit(1)
+
+
+def set_seed(seed):
+    """재현성을 위해 랜덤 시드를 고정"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, 
@@ -148,6 +159,9 @@ def main():
                        help='이미 매칭된 파일 목록이 저장된 경로 (JSON 파일)')
     
     args = parser.parse_args()
+
+    # 시드 고정
+    set_seed(args.random_state)
     
     # 디렉토리 확인
     if not os.path.exists(args.image_folder):

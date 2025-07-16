@@ -26,3 +26,5 @@ scikit-learn>=1.0.0
 pandas>=1.3.0
 # Accelerate 분산 학습 가속화 라이브러리
 accelerate>=0.20.0
+# 오디오 증강 라이브러리
+audiomentations>=0.42.0

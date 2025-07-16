@@ -68,7 +68,8 @@ python scripts/training/train_face_voice.py \
     --save_dir /path/to/save/model \
     --batch_size 32 \
     --num_epochs 100 \
-    --learning_rate 1e-4
+    --learning_rate 1e-3 \
+    --pretrained_lr 1e-5
 ```
 
 #### 일반 데이터셋용 모델 평가
@@ -144,7 +145,8 @@ drive.mount('/content/drive')
 - `--temperature`: InfoNCE 온도 파라미터 (기본값: 0.07)
 - `--batch_size`: 배치 크기 (기본값: 32)
 - `--num_epochs`: 학습 에포크 수 (기본값: 100)
-- `--learning_rate`: 학습률 (기본값: 1e-4)
+- `--learning_rate`: 신규 레이어용 기본 학습률 (기본값: 1e-3)
+- `--pretrained_lr`: 사전 학습된 레이어의 학습률 (기본값: 1e-5)
 - `--audio_duration_sec`: 오디오 길이 (초) (기본값: 5)
 
 

@@ -68,7 +68,9 @@ python scripts/training/train_face_voice.py \
     --save_dir /path/to/save/model \
     --batch_size 32 \
     --num_epochs 100 \
-    --learning_rate 1e-4
+    --learning_rate 1e-4 \
+    --disable_image_augmentation \
+    --disable_audio_augmentation
 ```
 
 #### 일반 데이터셋용 모델 평가
@@ -146,6 +148,8 @@ drive.mount('/content/drive')
 - `--num_epochs`: 학습 에포크 수 (기본값: 100)
 - `--learning_rate`: 학습률 (기본값: 1e-4)
 - `--audio_duration_sec`: 오디오 길이 (초) (기본값: 5)
+- `--disable_image_augmentation`: 이미지 데이터 증강 비활성화 (매개변수 제거 시 이미지 증강 활성화)
+- `--disable_audio_augmentation`: 오디오 데이터 증강 비활성화 (매개변수 제거 시 오디오 증강 활성화)
 
 
 

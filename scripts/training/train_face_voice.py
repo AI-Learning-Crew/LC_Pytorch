@@ -35,7 +35,7 @@ except ImportError as e:
 
 
 def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, scheduler,
-                device, num_epochs, save_dir, tensorboard_dir=None):
+                device, num_epochs, save_dir, tensorboard_dir=None, grad_clip_norm=1.0):
     """
     모델 학습
     """
@@ -69,8 +69,8 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, s
             loss.backward()
             
             # 그래디언트 클리핑 (안정성 향상)
-            if args.grad_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
+            if grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             
             optimizer.step()
             
@@ -171,14 +171,14 @@ def main():
                        help='가중치 감쇠 (기본값: 1e-4)')
     parser.add_argument('--grad_clip_norm', type=float, default=1.0,
                        help='그래디언트 클리핑 노름 (기본값: 1.0)')
-    parser.add_argument('--test_size', type=float, default=0.2,
-                       help='테스트 데이터 비율 (기본값: 0.2)')
+    parser.add_argument('--test_size', type=float, default=0.15,
+                       help='테스트 데이터 비율 (기본값: 0.15)')
     parser.add_argument('--random_state', type=int, default=42,
                        help='랜덤 시드 (기본값: 42)')
     
     # 오디오 설정
-    parser.add_argument('--audio_duration_sec', type=int, default=5,
-                       help='오디오 길이 (초) (기본값: 5)')
+    parser.add_argument('--audio_duration_sec', type=int, default=3,
+                       help='오디오 길이 (초) (기본값: 3)')
     parser.add_argument('--target_sr', type=int, default=16000,
                        help='오디오 샘플링 레이트 (기본값: 16000)')
     
@@ -309,7 +309,7 @@ def main():
     history = train_model(
         model, train_dataloader, test_dataloader, 
         criterion, optimizer, scheduler, device, args.num_epochs, args.save_dir, 
-        tensorboard_dir
+        tensorboard_dir, args.grad_clip_norm
     )
     
     print(f"학습 완료! 모델이 '{args.save_dir}'에 저장되었습니다.")

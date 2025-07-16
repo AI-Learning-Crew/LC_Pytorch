@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-얼굴-음성 매칭 모델 학습 스크립트
+얼굴-음성 매칭 모델 학습 스크립트 (메모리 효율적 버전)
 """
 
 import argparse
@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime
+import gc
 
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent.parent.parent
@@ -19,6 +20,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 from tqdm.auto import tqdm
+import numpy as np
 
 try:
     from models.face_voice_model import FaceVoiceModel, InfoNCELoss, save_model_components
@@ -34,13 +36,36 @@ except ImportError as e:
     sys.exit(1)
 
 
+def get_optimal_batch_size(device, base_batch_size=16):
+    """
+    GPU 메모리에 따라 최적 배치 크기 계산
+    """
+    if device.type == 'cuda':
+        # GPU 메모리 확인
+        gpu_memory = torch.cuda.get_device_properties(device).total_memory / 1024**3  # GB
+        print(f"GPU 메모리: {gpu_memory:.1f} GB")
+        
+        if gpu_memory >= 24:  # 24GB 이상 (RTX 3090, A100 등)
+            return min(base_batch_size * 2, 32)
+        elif gpu_memory >= 12:  # 12GB 이상 (RTX 3080, 4080 등)
+            return min(base_batch_size * 1.5, 24)
+        elif gpu_memory >= 8:   # 8GB 이상 (RTX 3070, 4070 등)
+            return min(base_batch_size * 1.25, 20)
+        else:  # 8GB 미만
+            return max(base_batch_size // 2, 8)
+    else:
+        return max(base_batch_size // 2, 8)
+
+
 def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, scheduler,
                 device, num_epochs, save_dir, tensorboard_dir=None, grad_clip_norm=1.0):
     """
-    모델 학습
+    모델 학습 (메모리 효율적 버전)
     """
-    history = {'train_loss': [], 'val_loss': []}
+    history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     best_val_loss = float('inf')
+    patience_counter = 0
+    patience = 15  # 조기 종료를 위한 patience
     
     # TensorBoard 설정
     writer = None
@@ -55,101 +80,178 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, s
         # 학습 모드
         model.train()
         train_loss = 0.0
+        train_correct = 0
+        train_total = 0
         
         train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
         for batch_idx, (images, audios) in enumerate(train_pbar):
-            images, audios = images.to(device), audios.to(device)
-            
-            # NaN 체크
-            if torch.isnan(images).any() or torch.isnan(audios).any():
-                print(f"경고: 배치 {batch_idx}에서 입력 데이터에 NaN이 발견되었습니다. 건너뜁니다.")
-                continue
-            
-            # 순전파
-            image_embeddings, audio_embeddings = model(images, audios)
-            
-            # 임베딩 NaN 체크
-            if torch.isnan(image_embeddings).any() or torch.isnan(audio_embeddings).any():
-                print(f"경고: 배치 {batch_idx}에서 임베딩에 NaN이 발견되었습니다. 건너뜁니다.")
-                continue
-            
-            loss = criterion(image_embeddings, audio_embeddings)
-            
-            # 손실 NaN 체크
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"경고: 배치 {batch_idx}에서 손실이 NaN/Inf입니다. 건너뜁니다.")
-                continue
-            
-            # 역전파
-            optimizer.zero_grad()
-            loss.backward()
-            
-            # 그래디언트 클리핑 (안정성 향상)
-            if grad_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-            
-            optimizer.step()
-            
-            train_loss += loss.item()
-            train_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-            
-            # TensorBoard에 배치별 손실 기록
-            if writer:
-                writer.add_scalar('Loss/Train_Batch', loss.item(), global_step)
-            
-            global_step += 1
+            try:
+                # 메모리 정리
+                if batch_idx % 10 == 0:
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                
+                images, audios = images.to(device, non_blocking=True), audios.to(device, non_blocking=True)
+                
+                # NaN 체크
+                if torch.isnan(images).any() or torch.isnan(audios).any():
+                    print(f"경고: 배치 {batch_idx}에서 입력 데이터에 NaN이 발견되었습니다. 건너뜁니다.")
+                    continue
+                
+                # 순전파
+                image_embeddings, audio_embeddings = model(images, audios)
+                
+                # 임베딩 NaN 체크
+                if torch.isnan(image_embeddings).any() or torch.isnan(audio_embeddings).any():
+                    print(f"경고: 배치 {batch_idx}에서 임베딩에 NaN이 발견되었습니다. 건너뜁니다.")
+                    continue
+                
+                loss = criterion(image_embeddings, audio_embeddings)
+                
+                # 손실 NaN 체크
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"경고: 배치 {batch_idx}에서 손실이 NaN/Inf입니다. 건너뜁니다.")
+                    continue
+                
+                # 정확도 계산 (메모리 효율적)
+                with torch.no_grad():
+                    similarity_matrix = torch.matmul(image_embeddings, audio_embeddings.T)
+                    predictions = torch.argmax(similarity_matrix, dim=1)
+                    labels = torch.arange(images.size(0), device=device)
+                    correct = (predictions == labels).sum().item()
+                    train_correct += correct
+                    train_total += images.size(0)
+                
+                # 역전파
+                optimizer.zero_grad()
+                loss.backward()
+                
+                # 그래디언트 클리핑 (안정성 향상)
+                if grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+                
+                optimizer.step()
+                
+                train_loss += loss.item()
+                train_acc = train_correct / train_total if train_total > 0 else 0
+                train_pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}', 
+                    'acc': f'{train_acc:.3f}'
+                })
+                
+                # TensorBoard에 배치별 손실 기록 (메모리 효율적)
+                if writer and batch_idx % 5 == 0:  # 5배치마다만 기록
+                    writer.add_scalar('Loss/Train_Batch', loss.item(), global_step)
+                    writer.add_scalar('Accuracy/Train_Batch', train_acc, global_step)
+                
+                global_step += 1
+                
+                # 메모리에서 텐서 제거
+                del images, audios, image_embeddings, audio_embeddings, loss, similarity_matrix, predictions, labels
+                
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    print(f"OOM 발생: 배치 {batch_idx} 건너뜀")
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                    continue
+                else:
+                    raise e
         
         train_loss /= len(train_dataloader)
+        train_acc = train_correct / train_total if train_total > 0 else 0
         history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
         
         # 검증 모드
         model.eval()
         val_loss = 0.0
+        val_correct = 0
+        val_total = 0
         
         with torch.no_grad():
             val_pbar = tqdm(val_dataloader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]')
             for images, audios in val_pbar:
-                images, audios = images.to(device), audios.to(device)
-                
-                image_embeddings, audio_embeddings = model(images, audios)
-                loss = criterion(image_embeddings, audio_embeddings)
-                
-                val_loss += loss.item()
-                val_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+                try:
+                    images, audios = images.to(device, non_blocking=True), audios.to(device, non_blocking=True)
+                    
+                    image_embeddings, audio_embeddings = model(images, audios)
+                    loss = criterion(image_embeddings, audio_embeddings)
+                    
+                    # 정확도 계산
+                    similarity_matrix = torch.matmul(image_embeddings, audio_embeddings.T)
+                    predictions = torch.argmax(similarity_matrix, dim=1)
+                    labels = torch.arange(images.size(0), device=device)
+                    correct = (predictions == labels).sum().item()
+                    val_correct += correct
+                    val_total += images.size(0)
+                    
+                    val_loss += loss.item()
+                    val_acc = val_correct / val_total if val_total > 0 else 0
+                    val_pbar.set_postfix({
+                        'loss': f'{loss.item():.4f}', 
+                        'acc': f'{val_acc:.3f}'
+                    })
+                    
+                    # 메모리에서 텐서 제거
+                    del images, audios, image_embeddings, audio_embeddings, loss, similarity_matrix, predictions, labels
+                    
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        print(f"검증 중 OOM 발생: 배치 건너뜀")
+                        if device.type == 'cuda':
+                            torch.cuda.empty_cache()
+                        continue
+                    else:
+                        raise e
         
         val_loss /= len(val_dataloader)
+        val_acc = val_correct / val_total if val_total > 0 else 0
         history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
         
         print(f'Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+        print(f'          Train Acc: {train_acc:.3f}, Val Acc: {val_acc:.3f}')
         
         # TensorBoard에 에포크별 메트릭 기록
         if writer:
             writer.add_scalar('Loss/Train_Epoch', train_loss, epoch)
             writer.add_scalar('Loss/Val_Epoch', val_loss, epoch)
+            writer.add_scalar('Accuracy/Train_Epoch', train_acc, epoch)
+            writer.add_scalar('Accuracy/Val_Epoch', val_acc, epoch)
             
             # 학습률 기록
             for param_group in optimizer.param_groups:
                 writer.add_scalar('Learning_Rate', param_group['lr'], epoch)
             
-            # 모델 파라미터 분포 히스토그램 (매 10 에포크마다)
-            if (epoch + 1) % 10 == 0:
+            # 모델 파라미터 분포 히스토그램 (매 20 에포크마다, 메모리 절약)
+            if (epoch + 1) % 20 == 0:
                 for name, param in model.named_parameters():
                     if param.requires_grad:
                         writer.add_histogram(f'Parameters/{name}', param.data, epoch)
-                        if param.grad is not None:
-                            writer.add_histogram(f'Gradients/{name}', param.grad, epoch)
         
         # 최고 성능 모델 저장
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_model_components(model, save_dir)
-            print(f"새로운 최고 성능! Val Loss: {val_loss:.4f}")
+            print(f"새로운 최고 성능! Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.3f}")
+            patience_counter = 0
         else:
-            print(f"성능 개선 없음. 현재 최고: {best_val_loss:.4f}")
+            patience_counter += 1
+            print(f"성능 개선 없음. 현재 최고: {best_val_loss:.4f} (patience: {patience_counter}/{patience})")
+        
+        # 조기 종료 체크
+        if patience_counter >= patience:
+            print(f"조기 종료: {patience} 에포크 동안 성능 개선이 없었습니다.")
+            break
         
         # 스케줄러 스텝 (검증 후)
         if scheduler:
             scheduler.step(val_loss)
+        
+        # 에포크 끝에 메모리 정리
+        torch.cuda.empty_cache()
+        gc.collect()
     
     # TensorBoard 종료
     if writer:
@@ -173,22 +275,22 @@ def main():
     # 모델 설정
     parser.add_argument('--embedding_dim', type=int, default=512,
                        help='임베딩 차원 (기본값: 512)')
-    parser.add_argument('--temperature', type=float, default=0.1,
-                       help='InfoNCE 온도 파라미터 (기본값: 0.1)')
+    parser.add_argument('--temperature', type=float, default=0.07,
+                       help='InfoNCE 온도 파라미터 (기본값: 0.07)')
     
     # 학습 설정
     parser.add_argument('--batch_size', type=int, default=16,
                        help='배치 크기 (기본값: 16)')
     parser.add_argument('--num_epochs', type=int, default=100,
                        help='학습 에포크 수 (기본값: 100)')
-    parser.add_argument('--learning_rate', type=float, default=1e-4,
-                       help='학습률 (기본값: 1e-4)')
+    parser.add_argument('--learning_rate', type=float, default=2e-4,
+                       help='학습률 (기본값: 2e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                        help='가중치 감쇠 (기본값: 1e-4)')
-    parser.add_argument('--grad_clip_norm', type=float, default=0.5,
-                       help='그래디언트 클리핑 노름 (기본값: 0.5)')
-    parser.add_argument('--test_size', type=float, default=0.15,
-                       help='테스트 데이터 비율 (기본값: 0.15)')
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0,
+                       help='그래디언트 클리핑 노름 (기본값: 1.0)')
+    parser.add_argument('--test_size', type=float, default=0.2,
+                       help='테스트 데이터 비율 (기본값: 0.2)')
     parser.add_argument('--random_state', type=int, default=42,
                        help='랜덤 시드 (기본값: 42)')
     
@@ -210,6 +312,12 @@ def main():
     parser.add_argument('--no_tensorboard', action='store_true',
                        help='TensorBoard 로깅을 비활성화합니다')
     
+    # 메모리 최적화 설정
+    parser.add_argument('--num_workers', type=int, default=2,
+                       help='데이터로더 워커 수 (기본값: 2)')
+    parser.add_argument('--pin_memory', action='store_true',
+                       help='pin_memory 활성화 (GPU 사용 시 권장)')
+    
     args = parser.parse_args()
     
     # 디렉토리 확인
@@ -224,6 +332,18 @@ def main():
     # 장치 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"사용 장치: {device}")
+    
+    # GPU 메모리 정보 출력
+    if device.type == 'cuda':
+        print(f"GPU: {torch.cuda.get_device_name(device)}")
+        print(f"GPU 메모리: {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f} GB")
+        print(f"사용 가능한 GPU 메모리: {torch.cuda.memory_allocated(device) / 1024**3:.1f} GB")
+    
+    # 최적 배치 크기 계산
+    optimal_batch_size = get_optimal_batch_size(device, args.batch_size)
+    if optimal_batch_size != args.batch_size:
+        print(f"GPU 메모리에 따라 배치 크기를 {args.batch_size} → {optimal_batch_size}로 조정합니다.")
+        args.batch_size = optimal_batch_size
     
     # TensorBoard 디렉토리 설정
     tensorboard_dir = None
@@ -287,34 +407,60 @@ def main():
         args.audio_duration_sec, args.target_sr
     )
     
-    # 데이터로더 생성
+    # 메모리 효율적인 데이터로더 생성
+    pin_memory = args.pin_memory and device.type == 'cuda'
     train_dataloader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size, 
         shuffle=True, 
         collate_fn=collate_fn,
-        num_workers=4
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=args.num_workers > 0,
+        drop_last=True  # 마지막 배치가 불완전하면 버림
     )
     test_dataloader = DataLoader(
         test_dataset, 
         batch_size=args.batch_size, 
         shuffle=False, 
         collate_fn=collate_fn,
-        num_workers=4
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=args.num_workers > 0,
+        drop_last=True  # 마지막 배치가 불완전하면 버림
     )
     
     # 모델 생성
     print("모델 초기화 중...")
     model = FaceVoiceModel(embedding_dim=args.embedding_dim)
+    
+    # 그래디언트 체크포인팅 활성화 (메모리 절약)
+    if hasattr(model.image_encoder, 'gradient_checkpointing_enable'):
+        model.image_encoder.gradient_checkpointing_enable()
+    if hasattr(model.audio_encoder, 'gradient_checkpointing_enable'):
+        model.audio_encoder.gradient_checkpointing_enable()
+    
     model.to(device)
     
     # 손실 함수 및 옵티마이저
     criterion = InfoNCELoss(temperature=args.temperature)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), 
+        lr=args.learning_rate, 
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
     
-    # 학습률 스케줄러 추가 (더 적극적인 스케줄링)
+    # 개선된 학습률 스케줄러
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.3, patience=3, verbose=True, min_lr=1e-6
+        optimizer, 
+        mode='min', 
+        factor=0.5, 
+        patience=7, 
+        verbose=True, 
+        min_lr=1e-6,
+        threshold=1e-4
     )
     
     # 모델 저장 디렉토리 생성
@@ -322,6 +468,13 @@ def main():
     
     # 학습 실행
     print("학습 시작...")
+    print(f"모델 파라미터 수: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    print(f"학습률: {args.learning_rate}")
+    print(f"배치 크기: {args.batch_size}")
+    print(f"Temperature: {args.temperature}")
+    print(f"워커 수: {args.num_workers}")
+    print(f"Pin Memory: {pin_memory}")
+    
     history = train_model(
         model, train_dataloader, test_dataloader, 
         criterion, optimizer, scheduler, device, args.num_epochs, args.save_dir, 

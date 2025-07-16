@@ -34,7 +34,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, 
+def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, scheduler,
                 device, num_epochs, save_dir, tensorboard_dir=None):
     """
     모델 학습
@@ -127,8 +127,8 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
             print(f"성능 개선 없음. 현재 최고: {best_val_loss:.4f}")
         
         # 스케줄러 스텝 (검증 후)
-        # if scheduler: # scheduler 인자가 제거되어 주석 처리
-        #     scheduler.step(val_loss)
+        if scheduler:
+            scheduler.step(val_loss)
     
     # TensorBoard 종료
     if writer:
@@ -152,16 +152,18 @@ def main():
     # 모델 설정
     parser.add_argument('--embedding_dim', type=int, default=512,
                        help='임베딩 차원 (기본값: 512)')
-    parser.add_argument('--temperature', type=float, default=0.07,
-                       help='InfoNCE 온도 파라미터 (기본값: 0.07)')
+    parser.add_argument('--temperature', type=float, default=0.1,
+                       help='InfoNCE 온도 파라미터 (기본값: 0.1)')
     
     # 학습 설정
     parser.add_argument('--batch_size', type=int, default=32,
                        help='배치 크기 (기본값: 32)')
     parser.add_argument('--num_epochs', type=int, default=100,
                        help='학습 에포크 수 (기본값: 100)')
-    parser.add_argument('--learning_rate', type=float, default=1e-4,
-                       help='학습률 (기본값: 1e-4)')
+    parser.add_argument('--learning_rate', type=float, default=3e-4,
+                       help='학습률 (기본값: 3e-4)')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                       help='가중치 감쇠 (기본값: 1e-4)')
     parser.add_argument('--test_size', type=float, default=0.2,
                        help='테스트 데이터 비율 (기본값: 0.2)')
     parser.add_argument('--random_state', type=int, default=42,
@@ -285,7 +287,7 @@ def main():
     
     # 손실 함수 및 옵티마이저
     criterion = InfoNCELoss(temperature=args.temperature)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     
     # 학습률 스케줄러 추가
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -299,7 +301,7 @@ def main():
     print("학습 시작...")
     history = train_model(
         model, train_dataloader, test_dataloader, 
-        criterion, optimizer, device, args.num_epochs, args.save_dir, 
+        criterion, optimizer, scheduler, device, args.num_epochs, args.save_dir, 
         tensorboard_dir
     )
     

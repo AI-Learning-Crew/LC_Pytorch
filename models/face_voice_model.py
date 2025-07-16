@@ -27,13 +27,55 @@ class FaceVoiceModel(nn.Module):
         
         # 이미지 인코더 (ViT)
         self.image_encoder = ViTModel.from_pretrained(image_model_name)
-        self.image_projection = nn.Linear(self.image_encoder.config.hidden_size, embedding_dim)
+        # 그래디언트 체크포인팅 비활성화 (속도 향상)
+        self.image_encoder.gradient_checkpointing = False
+        
+        # 개선된 이미지 투영층
+        image_hidden_size = self.image_encoder.config.hidden_size
+        self.image_projection = nn.Sequential(
+            nn.Linear(image_hidden_size, embedding_dim * 2),
+            nn.LayerNorm(embedding_dim * 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.LayerNorm(embedding_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim, embedding_dim)
+        )
         
         # 오디오 인코더 (Wav2Vec2)
         self.audio_encoder = Wav2Vec2Model.from_pretrained(audio_model_name)
-        self.audio_projection = nn.Linear(self.audio_encoder.config.hidden_size, embedding_dim)
+        # 그래디언트 체크포인팅 비활성화 (속도 향상)
+        self.audio_encoder.gradient_checkpointing = False
+        
+        # 개선된 오디오 투영층
+        audio_hidden_size = self.audio_encoder.config.hidden_size
+        self.audio_projection = nn.Sequential(
+            nn.Linear(audio_hidden_size, embedding_dim * 2),
+            nn.LayerNorm(embedding_dim * 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.LayerNorm(embedding_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim, embedding_dim)
+        )
         
         self.embedding_dim = embedding_dim
+        
+        # 가중치 초기화
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        """투영층 가중치 초기화"""
+        for module in [self.image_projection, self.audio_projection]:
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
         
     def encode_image(self, images):
         """
@@ -91,16 +133,17 @@ class InfoNCELoss(nn.Module):
     같은 샘플의 임베딩은 가깝게, 다른 샘플의 임베딩은 멀게 만듭니다.
     """
     
-    def __init__(self, temperature: float = 0.07):
+    def __init__(self, temperature: float = 0.1):
         """
         InfoNCELoss 초기화
         
         Args:
-            temperature: 온도 파라미터 (0.07이 일반적으로 사용됨)
+            temperature: 온도 파라미터 (0.1이 더 안정적)
                         낮을수록 더 확실한 예측을, 높을수록 더 부드러운 예측을 유도
         """
         super(InfoNCELoss, self).__init__()
-        self.temperature = temperature
+        # 학습 가능한 temperature로 변경
+        self.log_temperature = nn.Parameter(torch.log(torch.tensor(temperature)))
         
     def forward(self, image_embeddings, audio_embeddings):
         """
@@ -115,10 +158,17 @@ class InfoNCELoss(nn.Module):
         """
         batch_size = image_embeddings.size(0)
         
+        # 추가 정규화 (안정성 향상)
+        image_embeddings = F.normalize(image_embeddings, p=2, dim=1)
+        audio_embeddings = F.normalize(audio_embeddings, p=2, dim=1)
+        
+        # Temperature를 양수로 제한하고 더 넓은 범위 허용
+        temperature = torch.exp(self.log_temperature).clamp(min=0.05, max=2.0)
+        
         # 유사도 행렬 계산: 각 이미지와 각 오디오 간의 코사인 유사도
         # 결과: (batch_size, batch_size) 행렬
         # similarity_matrix[i][j] = 이미지 i와 오디오 j 간의 유사도
-        similarity_matrix = torch.matmul(image_embeddings, audio_embeddings.T) / self.temperature
+        similarity_matrix = torch.matmul(image_embeddings, audio_embeddings.T) / temperature
         
         # 정답 라벨 생성: 대각선 요소들이 정답 (i번째 이미지와 i번째 오디오가 매칭)
         # torch.arange(batch_size)는 [0, 1, 2, ..., batch_size-1] 생성

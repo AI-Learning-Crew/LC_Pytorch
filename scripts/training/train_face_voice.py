@@ -60,9 +60,25 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer, s
         for batch_idx, (images, audios) in enumerate(train_pbar):
             images, audios = images.to(device), audios.to(device)
             
+            # NaN 체크
+            if torch.isnan(images).any() or torch.isnan(audios).any():
+                print(f"경고: 배치 {batch_idx}에서 입력 데이터에 NaN이 발견되었습니다. 건너뜁니다.")
+                continue
+            
             # 순전파
             image_embeddings, audio_embeddings = model(images, audios)
+            
+            # 임베딩 NaN 체크
+            if torch.isnan(image_embeddings).any() or torch.isnan(audio_embeddings).any():
+                print(f"경고: 배치 {batch_idx}에서 임베딩에 NaN이 발견되었습니다. 건너뜁니다.")
+                continue
+            
             loss = criterion(image_embeddings, audio_embeddings)
+            
+            # 손실 NaN 체크
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"경고: 배치 {batch_idx}에서 손실이 NaN/Inf입니다. 건너뜁니다.")
+                continue
             
             # 역전파
             optimizer.zero_grad()
@@ -165,12 +181,12 @@ def main():
                        help='배치 크기 (기본값: 16)')
     parser.add_argument('--num_epochs', type=int, default=100,
                        help='학습 에포크 수 (기본값: 100)')
-    parser.add_argument('--learning_rate', type=float, default=5e-4,
-                       help='학습률 (기본값: 5e-4)')
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                       help='학습률 (기본값: 1e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                        help='가중치 감쇠 (기본값: 1e-4)')
-    parser.add_argument('--grad_clip_norm', type=float, default=1.0,
-                       help='그래디언트 클리핑 노름 (기본값: 1.0)')
+    parser.add_argument('--grad_clip_norm', type=float, default=0.5,
+                       help='그래디언트 클리핑 노름 (기본값: 0.5)')
     parser.add_argument('--test_size', type=float, default=0.15,
                        help='테스트 데이터 비율 (기본값: 0.15)')
     parser.add_argument('--random_state', type=int, default=42,

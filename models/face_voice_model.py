@@ -73,9 +73,13 @@ class FaceVoiceModel(nn.Module):
         for module in [self.image_projection, self.audio_projection]:
             for layer in module:
                 if isinstance(layer, nn.Linear):
-                    nn.init.xavier_uniform_(layer.weight)
+                    # 더 안전한 초기화
+                    nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
                     if layer.bias is not None:
-                        nn.init.zeros_(layer.bias)
+                        nn.init.constant_(layer.bias, 0)
+                elif isinstance(layer, nn.LayerNorm):
+                    nn.init.constant_(layer.weight, 1)
+                    nn.init.constant_(layer.bias, 0)
         
     def encode_image(self, images):
         """
@@ -158,17 +162,29 @@ class InfoNCELoss(nn.Module):
         """
         batch_size = image_embeddings.size(0)
         
+        # NaN 체크 및 처리
+        if torch.isnan(image_embeddings).any() or torch.isnan(audio_embeddings).any():
+            print("경고: 임베딩에 NaN이 발견되었습니다!")
+            # NaN을 0으로 대체
+            image_embeddings = torch.nan_to_num(image_embeddings, nan=0.0)
+            audio_embeddings = torch.nan_to_num(audio_embeddings, nan=0.0)
+        
         # 추가 정규화 (안정성 향상)
         image_embeddings = F.normalize(image_embeddings, p=2, dim=1)
         audio_embeddings = F.normalize(audio_embeddings, p=2, dim=1)
         
         # Temperature를 양수로 제한하고 더 넓은 범위 허용
-        temperature = torch.exp(self.log_temperature).clamp(min=0.05, max=2.0)
+        temperature = torch.exp(self.log_temperature).clamp(min=0.1, max=1.0)
         
         # 유사도 행렬 계산: 각 이미지와 각 오디오 간의 코사인 유사도
         # 결과: (batch_size, batch_size) 행렬
         # similarity_matrix[i][j] = 이미지 i와 오디오 j 간의 유사도
         similarity_matrix = torch.matmul(image_embeddings, audio_embeddings.T) / temperature
+        
+        # NaN 체크
+        if torch.isnan(similarity_matrix).any():
+            print("경고: 유사도 행렬에 NaN이 발견되었습니다!")
+            similarity_matrix = torch.nan_to_num(similarity_matrix, nan=0.0)
         
         # 정답 라벨 생성: 대각선 요소들이 정답 (i번째 이미지와 i번째 오디오가 매칭)
         # torch.arange(batch_size)는 [0, 1, 2, ..., batch_size-1] 생성
@@ -181,6 +197,11 @@ class InfoNCELoss(nn.Module):
         # 오디오->이미지 방향 손실: 각 오디오가 올바른 이미지를 찾도록 학습
         # similarity_matrix.T는 전치 행렬로, 각 오디오를 기준으로 계산
         audio_to_image_loss = F.cross_entropy(similarity_matrix.T, labels)
+        
+        # NaN 체크
+        if torch.isnan(image_to_audio_loss) or torch.isnan(audio_to_image_loss):
+            print("경고: 손실에 NaN이 발견되었습니다!")
+            return torch.tensor(0.0, device=image_embeddings.device, requires_grad=True)
         
         # 양방향 손실의 평균을 최종 손실로 사용
         # 이는 이미지->오디오와 오디오->이미지 매칭을 모두 학습하기 위함

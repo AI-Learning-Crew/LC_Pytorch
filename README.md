@@ -149,6 +149,8 @@ python scripts/training/train_face_voice_from_matched_file.py \
 - `--tensorboard_dir`: TensorBoard 로그 디렉토리 (기본값: save_dir/runs)
 - `--no_tensorboard`: TensorBoard 로깅 비활성화
 - `--pretrained_lr`: 사전 학습된 레이어의 학습률 (기본값: 1e-5)
+- `--disable_image_augmentation`: 이미지 데이터 증강 비활성화 (매개변수 제거 시 이미지 증강 활성화)
+- `--disable_audio_augmentation`: 오디오 데이터 증강 비활성화 (매개변수 제거 시 오디오 증강 활성화)
 
 ### 5. TensorBoard 모니터링
 

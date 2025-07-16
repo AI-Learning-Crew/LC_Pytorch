@@ -7,6 +7,8 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import random
+import numpy as np
 from datetime import datetime
 
 # 프로젝트 루트를 Python 경로에 추가
@@ -23,7 +25,7 @@ from tqdm.auto import tqdm
 try:
     from models.face_voice_model import FaceVoiceModel, InfoNCELoss, save_model_components
     from datasets.face_voice_dataset import (
-        FaceVoiceDataset, collate_fn, create_data_transforms, match_face_voice_files
+        FaceVoiceDataset, collate_fn, create_data_transforms, create_audio_augmentations, match_face_voice_files
     )
 except ImportError as e:
     print(f"모듈 import 오류: {e}")
@@ -33,6 +35,14 @@ except ImportError as e:
     print(f"python scripts/train_face_voice.py [인자들]")
     sys.exit(1)
 
+
+def set_seed(seed):
+    """재현성을 위해 랜덤 시드를 고정"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
                 device, num_epochs, save_dir, tensorboard_dir=None):
@@ -181,6 +191,11 @@ def main():
                        help='테스트 데이터 비율 (기본값: 0.2)')
     parser.add_argument('--random_state', type=int, default=42,
                        help='랜덤 시드 (기본값: 42)')
+    parser.add_argument('--disable_image_augmentation', action='store_true',
+                        help='이미지 데이터 증강을 비활성화합니다.')
+    parser.add_argument('--disable_audio_augmentation', action='store_true',
+                        help='오디오 데이터 증강을 비활성화합니다.')
+
 
     # 오디오 설정
     parser.add_argument('--audio_duration_sec', type=int, default=5,
@@ -202,6 +217,10 @@ def main():
 
     args = parser.parse_args()
 
+    # 시드 고정
+    set_seed(args.random_state)
+
+
     # 디렉토리 확인
     if not os.path.exists(args.image_folder):
         print(f"오류: 이미지 폴더 '{args.image_folder}'가 존재하지 않습니다.")
@@ -214,6 +233,18 @@ def main():
     # 장치 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"사용 장치: {device}")
+
+    # 데이터 변환기 및 증강 파이프라인 생성
+    use_image_aug = not args.disable_image_augmentation
+    image_transform, processor = create_data_transforms(
+        use_augmentation=use_image_aug
+    )
+    use_audio_aug = not args.disable_audio_augmentation
+    audio_augmentations = create_audio_augmentations(
+        sample_rate=args.target_sr,
+        use_augmentation=use_audio_aug
+    )
+
 
     # TensorBoard 디렉토리 설정
     tensorboard_dir = None
@@ -270,11 +301,15 @@ def main():
     # 데이터셋 생성
     train_dataset = FaceVoiceDataset(
         train_files, processor, image_transform,
-        args.audio_duration_sec, args.target_sr
+        audio_augmentations=audio_augmentations,
+        audio_duration_sec=args.audio_duration_sec,
+        target_sr=args.target_sr
     )
     test_dataset = FaceVoiceDataset(
         test_files, processor, image_transform,
-        args.audio_duration_sec, args.target_sr
+        audio_augmentations=None,
+        audio_duration_sec=args.audio_duration_sec,
+        target_sr=args.target_sr
     )
 
     # 데이터로더 생성

@@ -33,11 +33,7 @@ class FaceVoiceModel(nn.Module):
         # 개선된 이미지 투영층
         image_hidden_size = self.image_encoder.config.hidden_size
         self.image_projection = nn.Sequential(
-            nn.Linear(image_hidden_size, embedding_dim * 2),
-            nn.LayerNorm(embedding_dim * 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.Linear(image_hidden_size, embedding_dim),
             nn.LayerNorm(embedding_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -52,11 +48,7 @@ class FaceVoiceModel(nn.Module):
         # 개선된 오디오 투영층
         audio_hidden_size = self.audio_encoder.config.hidden_size
         self.audio_projection = nn.Sequential(
-            nn.Linear(audio_hidden_size, embedding_dim * 2),
-            nn.LayerNorm(embedding_dim * 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.Linear(audio_hidden_size, embedding_dim),
             nn.LayerNorm(embedding_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -74,7 +66,7 @@ class FaceVoiceModel(nn.Module):
             for layer in module:
                 if isinstance(layer, nn.Linear):
                     # 더 안전한 초기화
-                    nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
+                    nn.init.xavier_normal_(layer.weight, gain=0.1)
                     if layer.bias is not None:
                         nn.init.constant_(layer.bias, 0)
                 elif isinstance(layer, nn.LayerNorm):
@@ -91,10 +83,27 @@ class FaceVoiceModel(nn.Module):
         Returns:
             이미지 임베딩 (batch_size, embedding_dim)
         """
+        # NaN 체크
+        if torch.isnan(images).any():
+            print("경고: 이미지 입력에 NaN이 발견되었습니다!")
+            images = torch.nan_to_num(images, nan=0.0)
+        
         image_outputs = self.image_encoder(images)
         # [CLS] 토큰 사용 (첫 번째 토큰)
         image_embeddings_raw = image_outputs.last_hidden_state[:, 0, :]
+        
+        # NaN 체크
+        if torch.isnan(image_embeddings_raw).any():
+            print("경고: 이미지 인코더 출력에 NaN이 발견되었습니다!")
+            image_embeddings_raw = torch.nan_to_num(image_embeddings_raw, nan=0.0)
+        
         image_embeddings = self.image_projection(image_embeddings_raw)
+        
+        # NaN 체크
+        if torch.isnan(image_embeddings).any():
+            print("경고: 이미지 투영층 출력에 NaN이 발견되었습니다!")
+            image_embeddings = torch.nan_to_num(image_embeddings, nan=0.0)
+        
         return F.normalize(image_embeddings, p=2, dim=1)
     
     def encode_audio(self, audios):
@@ -107,10 +116,27 @@ class FaceVoiceModel(nn.Module):
         Returns:
             오디오 임베딩 (batch_size, embedding_dim)
         """
+        # NaN 체크
+        if torch.isnan(audios).any():
+            print("경고: 오디오 입력에 NaN이 발견되었습니다!")
+            audios = torch.nan_to_num(audios, nan=0.0)
+        
         audio_outputs = self.audio_encoder(audios)
         # 시퀀스 평균 사용
         audio_embeddings_raw = torch.mean(audio_outputs.last_hidden_state, dim=1)
+        
+        # NaN 체크
+        if torch.isnan(audio_embeddings_raw).any():
+            print("경고: 오디오 인코더 출력에 NaN이 발견되었습니다!")
+            audio_embeddings_raw = torch.nan_to_num(audio_embeddings_raw, nan=0.0)
+        
         audio_embeddings = self.audio_projection(audio_embeddings_raw)
+        
+        # NaN 체크
+        if torch.isnan(audio_embeddings).any():
+            print("경고: 오디오 투영층 출력에 NaN이 발견되었습니다!")
+            audio_embeddings = torch.nan_to_num(audio_embeddings, nan=0.0)
+        
         return F.normalize(audio_embeddings, p=2, dim=1)
     
     def forward(self, images, audios):

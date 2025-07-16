@@ -37,7 +37,9 @@ except ImportError as e:
 
 
 def set_seed(seed):
-    """재현성을 위해 랜덤 시드를 고정"""
+    """
+    재현성을 위해 랜덤 시드를 고정
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

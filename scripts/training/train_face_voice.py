@@ -38,22 +38,9 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
                 device, num_epochs, save_dir, tensorboard_dir=None):
     """
     모델 학습
-    
-    Args:
-        model: 학습할 모델
-        train_dataloader: 학습 데이터로더
-        val_dataloader: 검증 데이터로더
-        criterion: 손실 함수
-        optimizer: 옵티마이저
-        device: 계산 장치
-        num_epochs: 학습 에포크 수
-        save_dir: 모델 저장 디렉토리
-        tensorboard_dir: TensorBoard 로그 디렉토리
-        
-    Returns:
-        학습 히스토리
     """
     history = {'train_loss': [], 'val_loss': []}
+    best_val_loss = float('inf')
     
     # TensorBoard 설정
     writer = None
@@ -131,8 +118,17 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
                         if param.grad is not None:
                             writer.add_histogram(f'Gradients/{name}', param.grad, epoch)
         
-        # 모델 저장 (매 에포크마다)
-        save_model_components(model, save_dir)
+        # 최고 성능 모델 저장
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_model_components(model, save_dir)
+            print(f"새로운 최고 성능! Val Loss: {val_loss:.4f}")
+        else:
+            print(f"성능 개선 없음. 현재 최고: {best_val_loss:.4f}")
+        
+        # 스케줄러 스텝 (검증 후)
+        # if scheduler: # scheduler 인자가 제거되어 주석 처리
+        #     scheduler.step(val_loss)
     
     # TensorBoard 종료
     if writer:
@@ -291,6 +287,11 @@ def main():
     criterion = InfoNCELoss(temperature=args.temperature)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     
+    # 학습률 스케줄러 추가
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+    )
+    
     # 모델 저장 디렉토리 생성
     os.makedirs(args.save_dir, exist_ok=True)
     
@@ -298,7 +299,8 @@ def main():
     print("학습 시작...")
     history = train_model(
         model, train_dataloader, test_dataloader, 
-        criterion, optimizer, device, args.num_epochs, args.save_dir, tensorboard_dir
+        criterion, optimizer, device, args.num_epochs, args.save_dir, 
+        tensorboard_dir
     )
     
     print(f"학습 완료! 모델이 '{args.save_dir}'에 저장되었습니다.")

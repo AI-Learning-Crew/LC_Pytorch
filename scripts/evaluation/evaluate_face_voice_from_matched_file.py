@@ -68,7 +68,7 @@ def main():
     print(f"평가에 사용될 장치: {device}")
     
     # 데이터 변환기 생성
-    image_transform, processor = create_data_transforms()
+    image_transform, processor = create_data_transforms(use_augmentation=False)
     
     if not os.path.exists(args.matched_file):
         print(f"오류: 매칭된 파일 '{args.matched_file}'가 존재하지 않습니다.")
@@ -87,7 +87,9 @@ def main():
     # 테스트 데이터셋 생성
     test_dataset = FaceVoiceDataset(
         matched_files, processor, image_transform, 
-        args.audio_duration_sec, args.target_sr
+        audio_augmentations=None,
+        audio_duration_sec=args.audio_duration_sec,
+        target_sr=args.target_sr
     )
     
     # 테스트 데이터로더 생성

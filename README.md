@@ -98,7 +98,7 @@ python scripts/training/train_face_voice.py \
     --save_dir /path/to/save \
     --batch_size 32 \
     --num_epochs 100 \
-    --learning_rate 1e-3
+    --learning_rate 1e-3 \
     --pretrained_lr 1e-5
 ```
 
@@ -185,6 +185,7 @@ python scripts/evaluation/evaluate_face_voice.py \
     --audio_folder /path/to/audio \
     --model_dir /path/to/model \
     --batch_size 32 \
+    --test_size 0.7 \
     --top_k 5 \
     --output_file results.csv
 ```

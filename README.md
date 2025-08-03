@@ -98,7 +98,7 @@ python scripts/training/train_face_voice.py \
     --save_dir /path/to/save \
     --batch_size 32 \
     --num_epochs 100 \
-    --learning_rate 1e-3
+    --learning_rate 1e-3 \
     --pretrained_lr 1e-5
 ```
 
@@ -125,9 +125,17 @@ python scripts/training/train_face_voice.py \
 ```
 
 **매칭 파일 기반 학습:**
+
+**⚠️ 중요: 매칭 파일 기반 학습을 사용하기 전에 다음 경로 설정이 필요합니다:**
+
+```bash
+# 코랩에서 공유폴더 바로가기 추가
+# Google Drive의 공유폴더를 datasets/voxceleb2/voxceleb2 경로에 바로가기 생성
+```
+
 ```bash
 python scripts/training/train_face_voice_from_matched_file.py \
-    --matched_file /path/to/matched_files.txt \
+    --matched_file ./datasets/output/matched-file.txt \
     --save_dir /path/to/save \
     --batch_size 32 \
     --num_epochs 100
@@ -177,6 +185,7 @@ python scripts/evaluation/evaluate_face_voice.py \
     --audio_folder /path/to/audio \
     --model_dir /path/to/model \
     --batch_size 32 \
+    --test_size 0.7 \
     --top_k 5 \
     --output_file results.csv
 ```

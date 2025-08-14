@@ -45,6 +45,8 @@ def main():
                        help='데이터셋 메타데이터 JSON 파일 경로')
     parser.add_argument('-o', '--output', type=str, required=True,
                        help='매칭 결과를 저장할 출력 디렉토리')
+    parser.add_argument('-s', '--start', type=str, required=True,
+                       help='매칭을 시작할 인덱스 (예: 0)')
     parser.add_argument('-l', '--limit', type=str, required=True,
                        help='매칭할 최대 인덱스 수 (예: 100)')
     
@@ -67,6 +69,7 @@ def main():
     logging.info(f"Dataset path: {args.dataset_path}")
     logging.info(f"Metadata path: {args.meta_path}")   
     logging.info(f"Output path: {args.output}")
+    logging.info(f"Start index: {args.start}")
     logging.info(f"Limit: {args.limit}")
     
     # JSON 파일에서 ID 리스트 로드
@@ -77,7 +80,8 @@ def main():
         id_list=id_list,
         train_base_dir=Path(args.dataset_path),
         output_base_dir=Path(args.output),
-        max_index=int(args.limit)
+        start_index=int(args.start),
+        max_index=int(args.start + args.limit)
     )
     
     return 0

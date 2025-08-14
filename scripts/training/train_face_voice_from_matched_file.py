@@ -267,7 +267,11 @@ def main():
     with open(args.matched_file, 'r') as f:
         for line in f:
             image_path, audio_path = line.strip().split()
-            matched_files.append((image_path, audio_path))
+            # 두 파일 모두 존재할 때만 리스트에 추가
+            if os.path.exists(image_path) and os.path.exists(audio_path):
+                matched_files.append((image_path, audio_path))
+            else:
+                print(f"경고: 파일이 존재하지 않음 - {image_path} 또는 {audio_path}")
     print(f"총 {len(matched_files)}개의 매칭된 파일 쌍을 찾았습니다.")
     if len(matched_files) == 0:
         print("오류: 매칭된 파일이 없습니다.")

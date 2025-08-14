@@ -70,6 +70,7 @@ def save_matched_files_by_index(
     id_list: List[str],
     train_base_dir: Path,
     output_base_dir: Path,
+    start_index: int = 0,
     max_index: int = 100
 ):
     """
@@ -88,7 +89,7 @@ def save_matched_files_by_index(
     output_base_dir.mkdir(parents=True, exist_ok=True)
 
     # 각 인덱스에 대해 처리
-    for idx in range(max_index):
+    for idx in range(start_index, max_index):
         matched_files = []
 
         # 각 ID에 대해 해당 인덱스의 파일 쌍을 찾기

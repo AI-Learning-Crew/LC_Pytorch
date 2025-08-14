@@ -1,0 +1,10 @@
+datasets/voxceleb2/VoxCeleb2/test/id01460/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id01460/voices/00001.wav
+datasets/voxceleb2/VoxCeleb2/test/id01298/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id01298/voices/00001.wav
+datasets/voxceleb2/VoxCeleb2/test/id04950/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id04950/voices/00001.wav
+datasets/voxceleb2/VoxCeleb2/test/id02286/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id02286/voices/00001.wav
+datasets/voxceleb2/VoxCeleb2/test/id05176/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id05176/voices/00001.wav
+datasets/voxceleb2/VoxCeleb2/test/id00817/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id00817/voices/00001.wav
+datasets/voxceleb2/VoxCeleb2/test/id04276/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id04276/voices/00001.wav
+datasets/voxceleb2/VoxCeleb2/test/id00812/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id00812/voices/00001.wav
+datasets/voxceleb2/VoxCeleb2/test/id01593/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id01593/voices/00001.wav
+datasets/voxceleb2/VoxCeleb2/test/id01106/faces/00001/frame_0005.jpg	datasets/voxceleb2/VoxCeleb2/test/id01106/voices/00001.wav

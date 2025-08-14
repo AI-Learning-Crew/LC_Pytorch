@@ -23,7 +23,8 @@ from datasets.face_voice_dataset import (
 )
 from utils.evaluator import (
     evaluate_summary_metrics, evaluate_retrieval_ranking, 
-    calculate_retrieval_metrics, print_evaluation_summary
+    calculate_retrieval_metrics, print_evaluation_summary,
+    save_results_to_csv
 )
 
 
@@ -32,7 +33,7 @@ def main():
     
     # 데이터 경로
     parser.add_argument('--matched_file', type=str, required=True,
-                       help='매칭된 파일 경로 (예: matched_files.txt)')
+                        help='매칭된 파일 경로 (예: matched_files.txt)')
     parser.add_argument('--model_dir', type=str, required=True,
                        help='모델이 저장된 디렉토리')
     
@@ -57,19 +58,27 @@ def main():
     args = parser.parse_args()
     
     # 디렉토리 확인
-    
-    
     if not os.path.exists(args.model_dir):
         print(f"오류: 모델 디렉토리 '{args.model_dir}'가 존재하지 않습니다.")
         return 1
+
+    # --- Pandas 출력 옵션 설정 ---
+    # 이 옵션들을 설정하면 DataFrame이 생략 없이 전체 출력됩니다.
+    pd.set_option('display.max_columns', None)  # 모든 열을 출력
+    pd.set_option('display.width', 1000)        # 출력 너비를 넓게 설정하여 줄바꿈 방지
+    pd.set_option('display.max_colwidth', None) # 열 내용이 길어도 생략하지 않음
+    # -----------------------------------------
     
     # 장치 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"평가에 사용될 장치: {device}")
     
-    # 데이터 변환기 생성
-    image_transform, processor = create_data_transforms(use_augmentation=False)
+    # 데이터 변환기 생성 (테스트 데이터셋은 증강 off)
+    image_transform, processor = create_data_transforms(
+        use_augmentation=False
+    )
     
+    # 파일 매칭
     if not os.path.exists(args.matched_file):
         print(f"오류: 매칭된 파일 '{args.matched_file}'가 존재하지 않습니다.")
         return 1
@@ -78,15 +87,22 @@ def main():
     with open(args.matched_file, 'r') as f:
         for line in f:
             image_path, audio_path = line.strip().split()
-            matched_files.append((image_path, audio_path))
+            # 두 파일 모두 존재할 때만 리스트에 추가
+            if os.path.exists(image_path) and os.path.exists(audio_path):
+                matched_files.append((image_path, audio_path))
     print(f"총 {len(matched_files)}개의 매칭된 파일 쌍을 찾았습니다.")
     if len(matched_files) == 0:
         print("오류: 매칭된 파일이 없습니다.")
         return 1
+
+    
+    test_files = matched_files  # 평가에서는 전체 매칭된 파일을 사용
+    
+    print(f"테스트에 사용될 데이터: {len(test_files)}개")
     
     # 테스트 데이터셋 생성
     test_dataset = FaceVoiceDataset(
-        matched_files, processor, image_transform, 
+        test_files, processor, image_transform,
         audio_augmentations=None,
         audio_duration_sec=args.audio_duration_sec,
         target_sr=args.target_sr
@@ -132,14 +148,15 @@ def main():
     # 결과 출력
     print_evaluation_summary(top1_accuracy, auc_score, retrieval_metrics)
     
-    # 상세 결과 출력 (처음 20개만)
+    # 상세 결과 출력 (처음 50개만)
     print(f"\n--- 이미지 기반 음성 검색 평가 결과 (Top {args.top_k}) ---")
     pd.set_option('display.float_format', '{:.4f}'.format)
-    print(results_df.head(20))
+    # 이 메서드는 문자 너비를 고려하여 더 정확하게 정렬된 텍스트를 생성합니다.
+    print(results_df.head(50).to_string()) 
     
     # CSV 파일로 저장 (선택사항)
     if args.output_file:
-        results_df.to_csv(args.output_file, index=False)
+        save_results_to_csv(results_df, args.output_file)
         print(f"\n상세 결과가 '{args.output_file}'에 저장되었습니다.")
     
     return 0

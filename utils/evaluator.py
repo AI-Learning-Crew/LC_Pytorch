@@ -11,214 +11,139 @@ from sklearn.metrics import roc_auc_score
 from typing import Tuple, List, Dict
 
 
-def evaluate_summary_metrics(model, dataloader, device) -> Tuple[float, float]:
+def calculate_all_metrics(model, test_dataset, device, top_ks: List[int]) -> Tuple[Dict[str, float], float, pd.DataFrame]:
     """
-    요약 성능 지표 계산 (Top-1 Accuracy, ROC-AUC)
+    모든 평가 지표(검색 성능, ROC-AUC, 상세 랭킹)를 한 번에 계산합니다.
     
     Args:
         model: 평가할 모델
-        dataloader: 테스트 데이터로더
+        test_dataset: 테스트 데이터셋
         device: 계산 장치
+        top_ks: 계산할 Top-K 리스트 (예: [1, 5, 10])
         
     Returns:
-        Top-1 Accuracy, ROC-AUC Score
+        A tuple containing:
+        - retrieval_metrics (Dict[str, float]): Top-K 검색 정확도 딕셔너리
+        - auc_score (float): ROC-AUC 점수
+        - ranking_df (pd.DataFrame): 상세 랭킹 결과 DataFrame
     """
     model.eval()
-    all_image_embeddings, all_audio_embeddings = [], []
     
+    # --- 1. 임베딩 및 파일 경로 사전 계산 ---
+    all_image_embeddings, all_audio_embeddings = [], []
+    image_file_paths, audio_file_paths = [], []
+
     with torch.no_grad():
-        for images, audios in tqdm(dataloader, desc="테스트 임베딩 추출 중"):
-            images, audios = images.to(device), audios.to(device)
-            
-            # 임베딩 계산
-            image_embeddings, audio_embeddings = model(images, audios)
+        for i in tqdm(range(len(test_dataset)), desc="테스트 임베딩 계산 중"):
+            image_tensor, audio_tensor = test_dataset[i]
+            image_path, audio_path = test_dataset.file_pairs[i]
+
+            image_embeddings, audio_embeddings = model(
+                image_tensor.unsqueeze(0).to(device),
+                audio_tensor.unsqueeze(0).to(device)
+            )
             
             all_image_embeddings.append(image_embeddings.cpu())
             all_audio_embeddings.append(audio_embeddings.cpu())
-    
+            image_file_paths.append(image_path)
+            audio_file_paths.append(audio_path)
+
     all_image_embeddings = torch.cat(all_image_embeddings)
     all_audio_embeddings = torch.cat(all_audio_embeddings)
-    
-    # 유사도 행렬 계산
+
+    # --- 2. 유사도 행렬 계산 ---
     similarity_matrix = torch.matmul(all_image_embeddings, all_audio_embeddings.T)
-    
-    # Top-1 Accuracy 계산
-    top1_indices = torch.argmax(similarity_matrix, dim=1)
-    correct_labels = torch.arange(len(all_image_embeddings))
-    top1_accuracy = (top1_indices == correct_labels).float().mean().item()
-    
-    # ROC-AUC Score 계산
+    sorted_audio_indices = torch.argsort(similarity_matrix, dim=1, descending=True)
     num_samples = len(similarity_matrix)
-    labels = torch.eye(num_samples).flatten()  # 긍정적 쌍(대각선)은 1, 나머지는 0
+
+    # --- 3. ROC-AUC 점수 계산 (신뢰성 있는 방식) ---
+    labels = torch.eye(num_samples).flatten()
     scores = similarity_matrix.flatten()
     auc_score = roc_auc_score(labels.numpy(), scores.numpy())
     
-    return top1_accuracy, auc_score
-
-
-def evaluate_retrieval_ranking(model, test_dataset, device, top_k: int = 5) -> pd.DataFrame:
-    """
-    상세 랭킹 평가 (Top-K 검색 결과)
-    
-    Args:
-        model: 평가할 모델
-        test_dataset: 테스트 데이터셋
-        device: 계산 장치
-        top_k: 상위 K개 결과
-        
-    Returns:
-        평가 결과 DataFrame
-    """
-    model.eval()
-    
-    # 모든 테스트 데이터 임베딩 사전 계산
-    all_image_embeddings, all_audio_embeddings = [], []
-    image_file_paths, audio_file_paths = [], []
-    
-    with torch.no_grad():
-        for i in tqdm(range(len(test_dataset)), desc="전체 테스트 임베딩 계산 중"):
-            image_tensor, audio_tensor = test_dataset[i]
-            image_path, audio_path = test_dataset.file_pairs[i]
-            
-            # 임베딩 계산
-            image_embeddings, audio_embeddings = model(
-                image_tensor.unsqueeze(0).to(device), 
-                audio_tensor.unsqueeze(0).to(device)
-            )
-            
-            all_image_embeddings.append(image_embeddings.cpu())
-            all_audio_embeddings.append(audio_embeddings.cpu())
-            
-            image_file_paths.append(image_path)
-            audio_file_paths.append(audio_path)
-    
-    all_image_embeddings = torch.cat(all_image_embeddings)
-    all_audio_embeddings = torch.cat(all_audio_embeddings)
-    
-    # 유사도 행렬 계산 및 랭킹 생성
-    similarity_matrix = torch.matmul(all_image_embeddings, all_audio_embeddings.T)
-    sorted_audio_indices = torch.argsort(similarity_matrix, dim=1, descending=True)
-
-    # 결과를 DataFrame으로 정리
+    # --- 4. 검색 성능(Top-K) 및 상세 랭킹 DataFrame 계산 ---
+    retrieval_metrics = {f'Top_{k}_Accuracy': 0 for k in top_ks}
     evaluation_results = []
-    for i in range(len(image_file_paths)):
+
+    # 상세 랭킹 DF의 Top-K를 위한 최대 K 값 (예: [1, 5, 10] 중 10)
+    max_k_for_df = max(top_ks) 
+
+    for i in range(num_samples):
+        # 상세 랭킹 DataFrame을 위한 데이터 준비
         row_data = {'Image_File': os.path.basename(image_file_paths[i])}
-        top_k_indices = sorted_audio_indices[i, :top_k].tolist()
+        # 상세 랭킹 DF는 항상 모든 필요한 K까지 결과를 저장
+        top_k_indices_for_df = sorted_audio_indices[i, :max_k_for_df].tolist()
         
-        # 정답 여부를 먼저 플래그로 판단합니다.
-        is_correct_at_rank_1 = False
-        is_correct_in_topk = False
-        for rank, audio_idx in enumerate(top_k_indices):
+        # 각 Top-K에 해당하는 정답 여부 플래그
+        is_correct_at_rank_flags = {k: False for k in top_ks} 
+
+        for rank, audio_idx in enumerate(top_k_indices_for_df):
+            # 상세 랭킹 DF 채우기
             row_data[f'Rank_{rank+1}_Audio'] = os.path.basename(audio_file_paths[audio_idx])
             row_data[f'Rank_{rank+1}_Score'] = similarity_matrix[i, audio_idx].item()
             
-            # 정답 여부 확인
-            is_match = (os.path.basename(image_file_paths[i]).split('.')[0] ==
-                        os.path.basename(audio_file_paths[audio_idx]).split('.')[0])
-            
-            if is_match:
-                is_correct_in_topk = True
-                if rank == 0:
-                    is_correct_at_rank_1 = True
+            # 정답 여부 확인 (i번째 이미지의 정답은 i번째 오디오)
+            if audio_idx == i:
+                # 각 Top-K 정확도 계산을 위한 플래그 업데이트
+                for k_val in top_ks:
+                    if rank < k_val: # 현재 랭크가 해당 k_val 안에 들면 (0-indexed rank)
+                        is_correct_at_rank_flags[k_val] = True
 
-        # 루프가 끝난 후, 플래그 값에 따라 '✅' 또는 '❌'를 할당합니다.
-        # 이렇게 하면 두 열 모두 항상 동일한 너비의 이모지 문자를 갖게 됩니다.
-        row_data['Correct_at_Rank_1'] = "✅" if is_correct_at_rank_1 else "❌"
-        row_data[f'Correct_in_Top_{top_k}'] = "✅" if is_correct_in_topk else "❌"
-        
+        # 상세 랭킹 DF의 마커 할당
+        for k_val in top_ks:
+            col_name = f'Correct_at_Rank_{k_val}' if k_val != max_k_for_df else f'Correct_in_Top_{k_val}'
+            row_data[col_name] = "✅" if is_correct_at_rank_flags[k_val] else "❌"
+
         evaluation_results.append(row_data)
 
-    results_df = pd.DataFrame(evaluation_results)
+        # 각 Top-K의 전체 정확도에 합산
+        for k_val in top_ks:
+            if is_correct_at_rank_flags[k_val]:
+                retrieval_metrics[f'Top_{k_val}_Accuracy'] += 1
+
+    # 최종 정확도 계산 (비율로 변환)
+    for k_val in top_ks:
+        retrieval_metrics[f'Top_{k_val}_Accuracy'] /= num_samples
+
+    # 상세 랭킹 DataFrame 생성 및 컬럼 정리
+    ranking_df = pd.DataFrame(evaluation_results)
     
-    # 컬럼 순서 정리
-    display_cols = ['Image_File', 'Correct_at_Rank_1', f'Correct_in_Top_{top_k}']
-    for i in range(1, top_k + 1):
+    # 동적으로 display_cols 생성
+    display_cols = ['Image_File']
+    for k_val in sorted(top_ks): # 정렬된 순서대로 Correct 열 추가
+        col_name = f'Correct_at_Rank_{k_val}' if k_val != max_k_for_df else f'Correct_in_Top_{k_val}'
+        display_cols.append(col_name)
+
+    for i in range(1, max_k_for_df + 1):
         display_cols.extend([f'Rank_{i}_Audio', f'Rank_{i}_Score'])
     
-    # reindex 후 NaN이 생길 경우를 대비해 빈 문자열로 채웁니다.
-    return results_df.reindex(columns=display_cols).fillna('')
-
-
-def calculate_retrieval_metrics(model, test_dataset, device, top_ks: List[int] = [1, 5, 10]) -> Dict[str, float]:
-    """
-    다양한 Top-K에서의 검색 성능 계산
+    ranking_df = ranking_df.reindex(columns=display_cols).fillna('')
     
+    return retrieval_metrics, auc_score, ranking_df
+
+def print_evaluation_summary(retrieval_metrics: Dict[str, float], auc_score: float, user_topk_val: int):
+    """
+    통합된 평가 결과 요약 출력
     Args:
-        model: 평가할 모델
-        test_dataset: 테스트 데이터셋
-        device: 계산 장치
-        top_ks: 계산할 Top-K 리스트
-        
-    Returns:
-        각 Top-K에서의 정확도 딕셔너리
-    """
-    model.eval()
-    
-    # 모든 테스트 데이터 임베딩 사전 계산
-    all_image_embeddings, all_audio_embeddings = [], []
-    image_file_paths, audio_file_paths = [], []
-    
-    with torch.no_grad():
-        for i in tqdm(range(len(test_dataset)), desc="임베딩 계산 중"):
-            image_tensor, audio_tensor = test_dataset[i]
-            image_path, audio_path = test_dataset.file_pairs[i]
-            
-            image_embeddings, audio_embeddings = model(
-                image_tensor.unsqueeze(0).to(device), 
-                audio_tensor.unsqueeze(0).to(device)
-            )
-            
-            all_image_embeddings.append(image_embeddings.cpu())
-            all_audio_embeddings.append(audio_embeddings.cpu())
-            
-            image_file_paths.append(image_path)
-            audio_file_paths.append(audio_path)
-    
-    all_image_embeddings = torch.cat(all_image_embeddings)
-    all_audio_embeddings = torch.cat(all_audio_embeddings)
-    
-    # 유사도 행렬 계산
-    similarity_matrix = torch.matmul(all_image_embeddings, all_audio_embeddings.T)
-    sorted_audio_indices = torch.argsort(similarity_matrix, dim=1, descending=True)
-    
-    # 각 Top-K에서의 정확도 계산
-    metrics = {}
-    for k in top_ks:
-        correct_count = 0
-        for i in range(len(image_file_paths)):
-            top_k_indices = sorted_audio_indices[i, :k]
-            
-            # 정답이 Top-K에 있는지 확인
-            for audio_idx in top_k_indices:
-                if (os.path.basename(image_file_paths[i]).split('.')[0] == 
-                    os.path.basename(audio_file_paths[audio_idx]).split('.')[0]):
-                    correct_count += 1
-                    break
-        
-        metrics[f'Top_{k}_Accuracy'] = correct_count / len(image_file_paths)
-    
-    return metrics
-
-
-def print_evaluation_summary(top1_accuracy: float, auc_score: float, retrieval_metrics: Dict[str, float] = None):
-    """
-    평가 결과 요약 출력
-    
-    Args:
-        top1_accuracy: Top-1 정확도
+        retrieval_metrics: 검색 성능 지표 딕셔너리
         auc_score: ROC-AUC 점수
-        retrieval_metrics: 검색 성능 지표
+        user_topk_val: 사용자가 입력한 --top_k 값
     """
-    print("\n--- 최종 평가 결과 ---")
-    print(f"✅ Top-1 Accuracy : {top1_accuracy * 100:.2f}%")
-    print(f"✅ ROC-AUC Score  : {auc_score:.4f}")
+    print("\n--- 통합 평가 결과 ---")
+    print(f"✅ ROC-AUC Score       : {auc_score:.4f}")
+
+    # 출력할 Top-K 리스트 생성: 항상 1, 5를 포함하고 user_topk_val도 추가
+    display_top_ks = sorted(list(set([1, 5, user_topk_val])))
     
-    if retrieval_metrics:
-        print("\n--- 검색 성능 지표 ---")
-        for metric_name, value in retrieval_metrics.items():
-            print(f"✅ {metric_name}: {value * 100:.2f}%")
-    
-    print("--------------------")
+    print("\n--- 검색 성능 지표 ---")
+    for k_val in display_top_ks:
+        metric_name = f'Top_{k_val}_Accuracy'
+        if metric_name in retrieval_metrics: # calculate_all_metrics에서 계산된 K만 출력
+            # 패딩을 위한 최대 길이 계산
+            max_name_len = max(len(f'Top_{k}_Accuracy') for k in display_top_ks)
+            padding = " " * (max_name_len - len(metric_name)) 
+            print(f"✅ {metric_name}{padding}: {retrieval_metrics[metric_name] * 100:.2f}%")
+    print("----------------------")
 
 def save_results_to_csv(df: pd.DataFrame, file_path: str):
     """

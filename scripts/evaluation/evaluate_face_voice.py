@@ -19,7 +19,7 @@ from sklearn.model_selection import train_test_split
 
 from models.face_voice_model import FaceVoiceModel, load_model_components
 from datasets.face_voice_dataset import (
-    FaceVoiceDataset, collate_fn, create_data_transforms, match_face_voice_files
+    FaceVoiceDataset, create_data_transforms, match_face_voice_files
 )
 from utils.evaluator import (
     calculate_all_metrics, print_evaluation_summary, save_results_to_csv
@@ -75,6 +75,7 @@ def main():
     pd.set_option('display.max_columns', None)  # 모든 열을 출력
     pd.set_option('display.width', 1000)        # 출력 너비를 넓게 설정하여 줄바꿈 방지
     pd.set_option('display.max_colwidth', None) # 열 내용이 길어도 생략하지 않음
+    pd.set_option('display.float_format', '{:.4f}'.format) # 소수점 형식 지정
     # -----------------------------------------
     
     # 장치 설정
@@ -112,15 +113,6 @@ def main():
         target_sr=args.target_sr
     )
     
-    # 테스트 데이터로더 생성
-    test_dataloader = DataLoader(
-        test_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=False, 
-        collate_fn=collate_fn,
-        num_workers=4
-    )
-    
     # 모델 생성 및 로드
     print("모델 로드 중...")
     model = FaceVoiceModel()
@@ -135,24 +127,29 @@ def main():
     
     # 모든 평가 지표를 calculate_all_metrics 함수 하나로 통합하여 계산
     all_top_ks = sorted(list(set([1, 5, args.top_k]))) # 사용자가 지정한 top_k 포함
-    print(f"\n=== 통합 평가 지표 계산 및 상세 랭킹 생성 (Top-{','.join(map(str, all_top_ks))}) ===")
+    ranking_display_ks_str = ", ".join(map(str, all_top_ks))
+
+    print(f"\n=== 통합 평가 지표 계산 및 상세 랭킹 생성 (Top-{ranking_display_ks_str}) ===")
     
-    retrieval_metrics, auc_score, ranking_df = calculate_all_metrics(
+    # 통합 평가 함수 호출
+    metrics_i2a, metrics_a2i, auc_score, df_i2a, df_a2i = calculate_all_metrics(
         model, test_dataset, device, top_ks=all_top_ks
     )
     
     # 통합 평과 결과 출력
-    print_evaluation_summary(retrieval_metrics, auc_score, args.top_k)
+    print_evaluation_summary(metrics_i2a, metrics_a2i, auc_score, args.top_k)
     
     # 상세 평가 내용 출력 (처음 50개만)
-    print(f"\n--- 이미지 기반 음성 검색 결과 (Top-{','.join(map(str, all_top_ks))}) ---")
-    # pd.set_option('display.float_format', '{:.4f}'.format)
-    # 이 메서드는 문자 너비를 고려하여 더 정확하게 정렬된 텍스트를 생성합니다.
-    print(ranking_df.head(50).to_string()) 
+    print(f"\n--- 이미지 -> 음성 검색 결과 (Top-{ranking_display_ks_str}) ---")
+    print(df_i2a.head(50).to_string())
+
+    print(f"\n--- 음성 -> 이미지 검색 결과 (Top-{ranking_display_ks_str}) ---")
+    print(df_a2i.head(50).to_string())
     
-    # CSV 파일로 저장 (선택사항)
+    # CSV 파일로 저장
     if args.output_file:
-        save_results_to_csv(ranking_df, args.output_file)
+        # 두 개의 DataFrame을 모두 전달하여 하나의 파일에 저장
+        save_results_to_csv(df_i2a, df_a2i, args.output_file)
         print(f"\n상세 결과가 '{args.output_file}'에 저장되었습니다.")
     
     return 0

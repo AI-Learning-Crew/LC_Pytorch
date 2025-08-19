@@ -2,18 +2,16 @@
 모델 평가를 위한 유틸리티
 """
 
+import os
 import torch
-import torch.nn.functional as F
 import pandas as pd
-import numpy as np
-from tqdm.auto import tqdm
 from sklearn.metrics import roc_auc_score
-from typing import Tuple, List, Dict
+from tqdm.auto import tqdm
+from typing import List, Dict, Tuple
 
-
-def calculate_all_metrics(model, test_dataset, device, top_ks: List[int]) -> Tuple[Dict[str, float], float, pd.DataFrame]:
+def calculate_all_metrics(model, test_dataset, device, top_ks: List[int]) -> Tuple[Dict, Dict, float, pd.DataFrame, pd.DataFrame]:
     """
-    모든 평가 지표(검색 성능, ROC-AUC, 상세 랭킹)를 한 번에 계산합니다.
+    모든 평가 지표(양방향 검색 성능, ROC-AUC, 상세 랭킹)를 한 번에 계산합니다.
     
     Args:
         model: 평가할 모델
@@ -23,13 +21,15 @@ def calculate_all_metrics(model, test_dataset, device, top_ks: List[int]) -> Tup
         
     Returns:
         A tuple containing:
-        - retrieval_metrics (Dict[str, float]): Top-K 검색 정확도 딕셔너리
+        - retrieval_metrics_i2a (Dict): 이미지->음성 검색 정확도
+        - retrieval_metrics_a2i (Dict): 음성->이미지 검색 정확도
         - auc_score (float): ROC-AUC 점수
-        - ranking_df (pd.DataFrame): 상세 랭킹 결과 DataFrame
+        - ranking_df_i2a (pd.DataFrame): 이미지->음성 상세 랭킹
+        - ranking_df_a2i (pd.DataFrame): 음성->이미지 상세 랭킹
     """
     model.eval()
     
-    # --- 1. 임베딩 및 파일 경로 사전 계산 ---
+    # --- 임베딩 및 파일 경로 사전 계산 (가장 오래 걸리는 작업이므로 한 번만 수행) ---
     all_image_embeddings, all_audio_embeddings = [], []
     image_file_paths, audio_file_paths = [], []
 
@@ -51,131 +51,137 @@ def calculate_all_metrics(model, test_dataset, device, top_ks: List[int]) -> Tup
     all_image_embeddings = torch.cat(all_image_embeddings)
     all_audio_embeddings = torch.cat(all_audio_embeddings)
 
-    # --- 2. 유사도 행렬 계산 ---
+    # --- 유사도 행렬 계산 ---
     similarity_matrix = torch.matmul(all_image_embeddings, all_audio_embeddings.T)
-    sorted_audio_indices = torch.argsort(similarity_matrix, dim=1, descending=True)
     num_samples = len(similarity_matrix)
 
-    # --- 3. ROC-AUC 점수 계산 (신뢰성 있는 방식) ---
+    # --- ROC-AUC 점수 계산 ---
     labels = torch.eye(num_samples).flatten()
     scores = similarity_matrix.flatten()
     auc_score = roc_auc_score(labels.numpy(), scores.numpy())
     
-    # --- 4. 검색 성능(Top-K) 및 상세 랭킹 DataFrame 계산 ---
-    retrieval_metrics = {f'Top_{k}_Accuracy': 0 for k in top_ks}
-    evaluation_results = []
+    # --- 양방향 랭킹 및 정확도 계산 ---
+    # 이미지 -> 음성 검색
+    sorted_audio_indices = torch.argsort(similarity_matrix, dim=1, descending=True)
+    # 음성 -> 이미지 검색 (유사도 행렬을 전치하여 계산)
+    sorted_image_indices = torch.argsort(similarity_matrix.T, dim=1, descending=True)
 
-    # 상세 랭킹 DF의 Top-K를 위한 최대 K 값 (예: [1, 5, 10] 중 10)
-    max_k_for_df = max(top_ks) 
+    # 결과를 저장할 변수들 초기화
+    retrieval_metrics_i2a = {f'Top_{k}_Accuracy': 0 for k in top_ks}
+    retrieval_metrics_a2i = {f'Top_{k}_Accuracy': 0 for k in top_ks}
+    eval_results_i2a, eval_results_a2i = [], []
+    max_k_for_df = max(top_ks)
 
     for i in range(num_samples):
-        # 상세 랭킹 DataFrame을 위한 데이터 준비
-        row_data = {'Image_File': os.path.basename(image_file_paths[i])}
-        # 상세 랭킹 DF는 항상 모든 필요한 K까지 결과를 저장
-        top_k_indices_for_df = sorted_audio_indices[i, :max_k_for_df].tolist()
-        
-        # 각 Top-K에 해당하는 정답 여부 플래그
-        is_correct_at_rank_flags = {k: False for k in top_ks} 
-
-        for rank, audio_idx in enumerate(top_k_indices_for_df):
-            # 상세 랭킹 DF 채우기
-            row_data[f'Rank_{rank+1}_Audio'] = os.path.basename(audio_file_paths[audio_idx])
-            row_data[f'Rank_{rank+1}_Score'] = similarity_matrix[i, audio_idx].item()
-            
-            # 정답 여부 확인 (i번째 이미지의 정답은 i번째 오디오)
+        # --- 이미지 -> 음성 평가 ---
+        row_data_i2a = {'Image_File': os.path.basename(image_file_paths[i])}
+        is_correct_i2a = {k: False for k in top_ks}
+        for rank, audio_idx in enumerate(sorted_audio_indices[i, :max_k_for_df]):
+            row_data_i2a[f'Rank_{rank+1}_Audio'] = os.path.basename(audio_file_paths[audio_idx])
+            row_data_i2a[f'Rank_{rank+1}_Score'] = similarity_matrix[i, audio_idx].item()
             if audio_idx == i:
-                # 각 Top-K 정확도 계산을 위한 플래그 업데이트
-                for k_val in top_ks:
-                    if rank < k_val: # 현재 랭크가 해당 k_val 안에 들면 (0-indexed rank)
-                        is_correct_at_rank_flags[k_val] = True
+                for k in top_ks:
+                    if rank < k: is_correct_i2a[k] = True
+        for k in top_ks:
+            col_name = f'Correct_at_Rank_{k}' if k == 1 else f'Correct_in_Top_{k}'
+            row_data_i2a[col_name] = "✅" if is_correct_i2a[k] else "❌"
+        eval_results_i2a.append(row_data_i2a)
+        
+        # --- 음성 -> 이미지 평가 ---
+        row_data_a2i = {'Audio_File': os.path.basename(audio_file_paths[i])}
+        is_correct_a2i = {k: False for k in top_ks}
+        for rank, image_idx in enumerate(sorted_image_indices[i, :max_k_for_df]):
+            row_data_a2i[f'Rank_{rank+1}_Image'] = os.path.basename(image_file_paths[image_idx])
+            row_data_a2i[f'Rank_{rank+1}_Score'] = similarity_matrix[image_idx, i].item()
+            if image_idx == i:
+                for k in top_ks:
+                    if rank < k: is_correct_a2i[k] = True
+        for k in top_ks:
+            col_name = f'Correct_at_Rank_{k}' if k == 1 else f'Correct_in_Top_{k}'
+            row_data_a2i[col_name] = "✅" if is_correct_a2i[k] else "❌"
+        eval_results_a2i.append(row_data_a2i)
 
-        # 상세 랭킹 DF의 마커 할당
-        for k_val in top_ks:
-            col_name = f'Correct_at_Rank_{k_val}' if k_val != max_k_for_df else f'Correct_in_Top_{k_val}'
-            row_data[col_name] = "✅" if is_correct_at_rank_flags[k_val] else "❌"
-
-        evaluation_results.append(row_data)
-
-        # 각 Top-K의 전체 정확도에 합산
-        for k_val in top_ks:
-            if is_correct_at_rank_flags[k_val]:
-                retrieval_metrics[f'Top_{k_val}_Accuracy'] += 1
+        # 양방향 Top-K 정확도 누적
+        for k in top_ks:
+            if is_correct_i2a[k]: retrieval_metrics_i2a[f'Top_{k}_Accuracy'] += 1
+            if is_correct_a2i[k]: retrieval_metrics_a2i[f'Top_{k}_Accuracy'] += 1
 
     # 최종 정확도 계산 (비율로 변환)
-    for k_val in top_ks:
-        retrieval_metrics[f'Top_{k_val}_Accuracy'] /= num_samples
+    for k in top_ks:
+        retrieval_metrics_i2a[f'Top_{k}_Accuracy'] /= num_samples
+        retrieval_metrics_a2i[f'Top_{k}_Accuracy'] /= num_samples
 
-    # 상세 랭킹 DataFrame 생성 및 컬럼 정리
-    ranking_df = pd.DataFrame(evaluation_results)
-    
-    # 동적으로 display_cols 생성
-    display_cols = ['Image_File']
-    for k_val in sorted(top_ks): # 정렬된 순서대로 Correct 열 추가
-        col_name = f'Correct_at_Rank_{k_val}' if k_val != max_k_for_df else f'Correct_in_Top_{k_val}'
-        display_cols.append(col_name)
+    # --- 양방향 DataFrame 생성 및 컬럼 정리 ---
+    def create_df(results, query_col, rank_col_prefix):
+        df = pd.DataFrame(results)
+        cols = [query_col]
+        for k in sorted(top_ks):
+            cols.append(f'Correct_at_Rank_{k}' if k == 1 else f'Correct_in_Top_{k}')
+        for i in range(1, max_k_for_df + 1):
+            cols.extend([f'Rank_{i}_{rank_col_prefix}', f'Rank_{i}_Score'])
+        return df.reindex(columns=cols).fillna('')
 
-    for i in range(1, max_k_for_df + 1):
-        display_cols.extend([f'Rank_{i}_Audio', f'Rank_{i}_Score'])
+    df_i2a = create_df(eval_results_i2a, 'Image_File', 'Audio')
+    df_a2i = create_df(eval_results_a2i, 'Audio_File', 'Image')
     
-    ranking_df = ranking_df.reindex(columns=display_cols).fillna('')
-    
-    return retrieval_metrics, auc_score, ranking_df
+    return retrieval_metrics_i2a, retrieval_metrics_a2i, auc_score, df_i2a, df_a2i
 
-def print_evaluation_summary(retrieval_metrics: Dict[str, float], auc_score: float, user_topk_val: int):
-    """
-    통합된 평가 결과 요약 출력
-    Args:
-        retrieval_metrics: 검색 성능 지표 딕셔너리
-        auc_score: ROC-AUC 점수
-        user_topk_val: 사용자가 입력한 --top_k 값
-    """
+def print_evaluation_summary(metrics_i2a, metrics_a2i, auc_score, user_topk):
+    """ 양방향 검색 결과를 포함한 통합 평가 요약 출력 """
     print("\n--- 통합 평가 결과 ---")
-    print(f"✅ ROC-AUC Score       : {auc_score:.4f}")
-
-    # 출력할 Top-K 리스트 생성: 항상 1, 5를 포함하고 user_topk_val도 추가
-    display_top_ks = sorted(list(set([1, 5, user_topk_val])))
+    print(f"✅ ROC-AUC Score : {auc_score:.4f}")
     
-    print("\n--- 검색 성능 지표 ---")
-    for k_val in display_top_ks:
-        metric_name = f'Top_{k_val}_Accuracy'
-        if metric_name in retrieval_metrics: # calculate_all_metrics에서 계산된 K만 출력
-            # 패딩을 위한 최대 길이 계산
-            max_name_len = max(len(f'Top_{k}_Accuracy') for k in display_top_ks)
-            padding = " " * (max_name_len - len(metric_name)) 
-            print(f"✅ {metric_name}{padding}: {retrieval_metrics[metric_name] * 100:.2f}%")
-    print("----------------------")
+    display_ks = sorted(list(set([1, 5, user_topk])))
+    max_name_len = max(len(f'Top_{k}_Accuracy') for k in display_ks)
 
-def save_results_to_csv(df: pd.DataFrame, file_path: str):
+    print("\n--- 이미지 -> 음성 검색 성능 ---")
+    for k in display_ks:
+        metric_name = f'Top_{k}_Accuracy'
+        if metric_name in metrics_i2a:
+            padding = " " * (max_name_len - len(metric_name))
+            print(f"✅ {metric_name}{padding}: {metrics_i2a[metric_name] * 100:.2f}%")
+            
+    print("\n--- 음성 -> 이미지 검색 성능 ---")
+    for k in display_ks:
+        metric_name = f'Top_{k}_Accuracy'
+        if metric_name in metrics_a2i:
+            padding = " " * (max_name_len - len(metric_name))
+            print(f"✅ {metric_name}{padding}: {metrics_a2i[metric_name] * 100:.2f}%")
+    print("--------------------------------")
+
+def save_results_to_csv(df_i2a: pd.DataFrame, df_a2i: pd.DataFrame, file_path: str):
     """
-    평가 결과 DataFrame을 CSV 파일로 저장합니다.
-    이모지를 텍스트로 변환하고, UTF-8 인코딩을 사용합니다.
-
+    양방향 평가 결과 DataFrame을 하나의 CSV 파일에 순차적으로 저장합니다.
     Args:
-        df (pd.DataFrame): 저장할 평가 결과 DataFrame
+        df_i2a (pd.DataFrame): 이미지 -> 음성 검색 결과
+        df_a2i (pd.DataFrame): 음성 -> 이미지 검색 결과
         file_path (str): 저장할 CSV 파일 경로
     """
-    if df.empty:
-        print("경고: 저장할 데이터가 없습니다. CSV 파일을 생성하지 않습니다.")
+    if df_i2a.empty or df_a2i.empty:
+        print("경고: 저장할 데이터가 없어 CSV 파일을 생성하지 않습니다.")
         return
 
-    # 원본 DataFrame을 수정하지 않기 위해 복사본을 만듭니다.
-    df_to_save = df.copy()
+    # CSV 저장을 위해 이모지를 텍스트로 변환
+    df_i2a_to_save = df_i2a.copy()
+    df_a2i_to_save = df_a2i.copy()
+    df_i2a_to_save.replace({"✅": "O", "❌": "X"}, inplace=True)
+    df_a2i_to_save.replace({"✅": "O", "❌": "X"}, inplace=True)
 
-    # CSV 저장을 위해 이모지 마커를 텍스트로 변환합니다.
-    # 터미널 출력용 마커를 CSV 저장용 텍스트로 대체합니다.
-    df_to_save.replace({
-        "✅": "Correct",
-        "❌": "Incorrect"
-    }, inplace=True)
-    
     try:
+        # 하나의 파일에 순차적으로 쓰기
         # UTF-8 인코딩(utf-8-sig)을 지정하여 이모지 및 다국어 깨짐 방지
-        # 'utf-8-sig'는 Excel에서 파일을 열 때 인코딩을 올바르게 인식하도록 돕습니다.
-        df_to_save.to_csv(file_path, index=False, encoding='utf-8-sig')
-        print(f"✅ 평가 결과가 '{file_path}' 파일에 성공적으로 저장되었습니다.")
+        with open(file_path, 'w', encoding='utf-8-sig') as f:
+            # 첫 번째 섹션: 이미지 -> 음성
+            f.write("--- Image to Audio Retrieval Results ---\n")
+            df_i2a_to_save.to_csv(f, index=False, lineterminator='\n')
+            
+            # 섹션 구분을 위한 공백
+            f.write("\n\n")
+
+            # 두 번째 섹션: 음성 -> 이미지
+            f.write("--- Audio to Image Retrieval Results ---\n")
+            df_a2i_to_save.to_csv(f, index=False, lineterminator='\n')
+            
+        print(f"✅ 양방향 상세 결과가 '{file_path}' 파일에 성공적으로 저장되었습니다.")
     except Exception as e:
-        print(f"❌ 오류: CSV 파일 저장에 실패했습니다. - {e}")
-
-
-# 편의를 위한 import 추가
-import os 
+        print(f"❌ 오류: CSV 파일 저장에 실패했습니다 - {e}")

@@ -6,6 +6,8 @@
 import argparse
 import os
 import sys
+import glob
+import json
 from pathlib import Path
 import random
 import numpy as np
@@ -24,10 +26,11 @@ from tqdm.auto import tqdm
 
 try:
     from models.face_voice_model import (
-        FaceVoiceModel, InfoNCELoss, save_model_components, load_model_components
+        FaceVoiceModel, InfoNCELoss
     )
     from datasets.face_voice_dataset import (
-        FaceVoiceDataset, collate_fn, create_data_transforms, create_audio_augmentations, match_face_voice_files
+        FaceVoiceDataset, collate_fn, create_data_transforms,
+        create_audio_augmentations, match_face_voice_files
     )
 except ImportError as e:
     print(f"모듈 import 오류: {e}")
@@ -48,47 +51,84 @@ def set_seed(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-def save_checkpoint(epoch, model, optimizer, scheduler, best_val_loss, current_val_loss, save_dir):
-    """
-    학습 상태(최신, 최고 성능, 체크포인트)를 저장합니다.
+def save_atomic(data, path):
+    """데이터를 임시 파일에 저장 후, 최종 경로로 원자적으로 이동(rename)합니다."""
+    temp_path = path + ".tmp"
+    try:
+        torch.save(data, temp_path)
+        os.rename(temp_path, path)
+    except Exception as e:
+        print(f"❌ 파일 저장 실패: {path} - {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
-    Args:
-        epoch (int): 현재 에포크 번호.
-        model: 저장할 모델.
-        optimizer: 저장할 옵티마이저.
-        scheduler: 저장할 스케줄러.
-        best_val_loss (float): 현재까지의 최고 검증 손실.
-        current_val_loss (float): 이번 에포크의 검증 손실.
-        save_dir (str): 저장할 디렉토리.
-    
-    Returns:
-        float: 업데이트된 최고 검증 손실.
-    """
-    # 최신 모델 컴포넌트 저장 (매 에포크마다 덮어쓰기)
-    # 이 파일들은 학습 재개 시 사용
-    save_model_components(model, save_dir)
+class CheckpointManager:
+    """체크포인트 관리를 위한 클래스 (저장, 로드, 정리)"""
+    def __init__(self, save_dir, max_to_keep=2):
+        self.save_dir = save_dir
+        self.max_to_keep = max_to_keep
+        os.makedirs(self.save_dir, exist_ok=True)
 
-    # 학습 재개를 위한 체크포인트 저장 (모델 가중치 제외)
-    checkpoint_path = os.path.join(save_dir, 'checkpoint.pth')
-    torch.save({
-        'epoch': epoch + 1,
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'best_val_loss': best_val_loss,
-    }, checkpoint_path)
+    def save(self, epoch, model, optimizer, scheduler, best_val_loss):
+        """재개에 필요한 모든 정보를 포함하는 체크포인트를 저장합니다."""
+        checkpoint_data = {
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'best_val_loss': best_val_loss,
+        }
+        filename = f"checkpoint_epoch_{epoch+1:04d}.pth"
+        filepath = os.path.join(self.save_dir, filename)
+        save_atomic(checkpoint_data, filepath)
+        print(f"Epoch {epoch+1}: 체크포인트가 '{os.path.basename(filepath)}'에 저장되었습니다.")
+        self._rotate_checkpoints()
 
-    # 최고 성능 모델 저장
-    if current_val_loss < best_val_loss:
-        best_val_loss = current_val_loss
-        print(f"🎉 새로운 최고 성능 모델 발견! (Val Loss: {best_val_loss:.4f}). 'best_model/' 디렉토리에 저장합니다.")
-        best_model_dir = os.path.join(save_dir, 'best_model')
-        save_model_components(model, best_model_dir)
-    
-    return best_val_loss
+    def load_latest(self, model, optimizer, scheduler, device):
+        """가장 최신의 체크포인트를 찾아 로드합니다."""
+        checkpoints = sorted(glob.glob(os.path.join(self.save_dir, "checkpoint_epoch_*.pth")))
+        if not checkpoints:
+            print("INFO: 저장된 체크포인트가 없습니다. 처음부터 학습을 시작합니다.")
+            return 0, float('inf')
+
+        latest_checkpoint_path = checkpoints[-1]
+        try:
+            print(f"가장 최신 체크포인트를 불러옵니다: {latest_checkpoint_path}")
+            checkpoint = torch.load(latest_checkpoint_path, map_location=device)
+            
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            start_epoch = checkpoint['epoch']
+            best_val_loss = checkpoint['best_val_loss']
+            
+            print(f"✅ Epoch {start_epoch} 체크포인트 로드 완료. Epoch {start_epoch+1}부터 학습을 재개합니다.")
+            return start_epoch, best_val_loss
+        except Exception as e:
+            print(f"❌ 체크포인트 로드 실패: {latest_checkpoint_path} - {e}. 학습을 처음부터 시작합니다.")
+            return 0, float('inf')
+
+    def _rotate_checkpoints(self):
+        """오래된 체크포인트를 삭제하여 max_to_keep 개수만 유지합니다."""
+        checkpoints = sorted(glob.glob(os.path.join(self.save_dir, "checkpoint_epoch_*.pth")))
+        if len(checkpoints) > self.max_to_keep:
+            for ckpt_to_delete in checkpoints[:-self.max_to_keep]:
+                print(f"오래된 체크포인트 삭제: {os.path.basename(ckpt_to_delete)}")
+                os.remove(ckpt_to_delete)
+
+def save_best_model_weights(model, filepath):
+    """추론을 위한 최고 성능 모델의 가중치(state_dict)만 단일 파일로 원자적으로 저장합니다."""
+    try:
+        save_atomic(model.state_dict(), filepath)
+        print(f"✅ 최고 성능 모델 가중치가 '{os.path.basename(filepath)}'에 안전하게 저장되었습니다.")
+    except Exception as e:
+        print(f"❌ 최고 성능 모델 저장 중 오류 발생: {e}")
 
 def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
                 scheduler, device, num_epochs, save_dir, tensorboard_dir,
-                start_epoch, best_val_loss):
+                start_epoch, best_val_loss, checkpoint_manager):
     """
     모델 학습
 
@@ -179,16 +219,15 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
         # 학습 진행 상황 출력
         print(f"Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LRs: [{lr_info}]")
 
-        # 학습 상태(최신, 최고 성능, 체크포인트)를 한 번에 저장
-        best_val_loss = save_checkpoint(
-            epoch=epoch,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            best_val_loss=best_val_loss,
-            current_val_loss=val_loss,
-            save_dir=save_dir
-        )
+        # 최고 성능 모델 저장
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            print(f"🎉 새로운 최고 성능 모델 발견! (Val Loss: {best_val_loss:.4f})")
+            best_model_path = os.path.join(save_dir, "best_model.pth")
+            save_best_model_weights(model, best_model_path)
+
+        # 재개에 필요한 모든 정보를 포함하는 체크포인트를 저장
+        checkpoint_manager.save(epoch, model, optimizer, scheduler, best_val_loss)
 
         # TensorBoard에 에포크별 메트릭 기록
         if writer:
@@ -299,6 +338,9 @@ def main():
         final_save_dir = os.path.join(args.save_dir, timestamp)
         os.makedirs(final_save_dir, exist_ok=True)
         print(f"새로운 학습을 시작합니다. 저장 디렉토리: {final_save_dir}")
+        with open(os.path.join(final_save_dir, 'config.json'), 'w', encoding='utf-8') as f:
+            json.dump(vars(args), f, ensure_ascii=False, indent=4)
+            print(f"학습 설정이 '{os.path.join(final_save_dir, 'config.json')}'에 저장되었습니다.")
 
     # TensorBoard 디렉토리 설정
     tensorboard_dir = None if args.no_tensorboard else os.path.join(final_save_dir, 'runs')
@@ -317,7 +359,6 @@ def main():
     # 파일 매칭 (선택적)
     if args.skip_file_matching:
         if args.matched_files_path and os.path.exists(args.matched_files_path):
-            import json
             print(f"저장된 파일 매칭 결과를 불러오는 중: {args.matched_files_path}")
             with open(args.matched_files_path, 'r', encoding='utf-8') as f:
                 matched_files = json.load(f)
@@ -332,7 +373,6 @@ def main():
 
         # 매칭 결과 저장 (선택적)
         if args.matched_files_path:
-            import json
             os.makedirs(os.path.dirname(args.matched_files_path), exist_ok=True)
             with open(args.matched_files_path, 'w', encoding='utf-8') as f:
                 json.dump(matched_files, f, ensure_ascii=False, indent=2)
@@ -413,28 +453,12 @@ def main():
         eta_min=1e-7          # 도달할 최소 학습률
     )
 
-    # 체크포인트 로드
+    # 체크포인트 매니저 생성
+    checkpoint_manager = CheckpointManager(save_dir=final_save_dir, max_to_keep=2)
+
+    # 학습 재개 시 가장 최신의 체크포인트를 찾아 로드
     if args.resume_dir:
-        # 모델 가중치는 항상 컴포넌트 파일에서 로드
-        print(f"모델 컴포넌트를 불러옵니다: {final_save_dir}")
-        model = load_model_components(model, final_save_dir, device)
-        if model is None:
-            print(f"❌ 오류: 모델 로드에 실패하여 학습을 중단합니다.")
-            return 1
-        
-        checkpoint_path = os.path.join(args.resume_dir, 'checkpoint.pth')
-        if os.path.exists(checkpoint_path):
-            print(f"체크포인트 파일을 불러옵니다: {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=device)
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch = checkpoint['epoch']
-            best_val_loss = checkpoint['best_val_loss']
-            print(f"✅ 체크포인트 로드 완료. Epoch {start_epoch}부터 학습을 재개합니다.")
-            print(f"   (이전 최고 Val Loss: {best_val_loss:.4f})")
-        else:
-            print(f"❌ 오류: --resume_dir이 지정되었지만 체크포인트 파일 '{checkpoint_path}'을 찾을 수 없습니다.")
-            return 1
+        start_epoch, best_val_loss = checkpoint_manager.load_latest(model, optimizer, scheduler, device)
 
     # --- 학습 실행 ---
     print("학습 시작...")
@@ -442,7 +466,7 @@ def main():
         model, train_dataloader, val_dataloader,
         InfoNCELoss(args.temperature),
         optimizer, scheduler, device, args.num_epochs, 
-        final_save_dir, tensorboard_dir, start_epoch, best_val_loss
+        final_save_dir, tensorboard_dir, start_epoch, best_val_loss, checkpoint_manager
     )
 
     print(f"학습 완료! 모델이 '{final_save_dir}'에 저장되었습니다.")

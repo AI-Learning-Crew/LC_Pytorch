@@ -195,7 +195,7 @@ python scripts/tensorboard/run_tensorboard_colab.py --log_dir /path/to/logs
 python scripts/evaluation/evaluate_face_voice.py \
     --image_folder /path/to/images \
     --audio_folder /path/to/audio \
-    --model_dir /path/to/model \
+    --model_path /path/to/model \
     --batch_size 32 \
     --test_size 0.7 \
     --top_k 5 \
@@ -205,7 +205,7 @@ python scripts/evaluation/evaluate_face_voice.py \
 **주요 파라미터:**
 - `--image_folder`: 얼굴 이미지 폴더 경로
 - `--audio_folder`: 음성 파일 폴더 경로
-- `--model_dir`: 학습된 모델 디렉토리
+- `--model_path`: 평가할 모델 파일(.pth) 경로
 - `--batch_size`: 배치 크기 (기본값: 32)
 - `--test_size`: 테스트 데이터 비율 (기본값: 0.05)
 - `--top_k`: 상위 K개 결과 평가 (기본값: 5)

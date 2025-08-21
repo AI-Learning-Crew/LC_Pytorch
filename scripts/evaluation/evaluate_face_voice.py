@@ -17,7 +17,7 @@ import pandas as pd
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 
-from models.face_voice_model import FaceVoiceModel, load_model_components
+from models.face_voice_model import FaceVoiceModel
 from datasets.face_voice_dataset import (
     FaceVoiceDataset, collate_fn, create_data_transforms, match_face_voice_files
 )
@@ -36,8 +36,8 @@ def main():
                        help='얼굴 이미지 폴더 경로')
     parser.add_argument('--audio_folder', type=str, required=True,
                        help='음성 파일 폴더 경로')
-    parser.add_argument('--model_dir', type=str, required=True,
-                       help='모델이 저장된 디렉토리')
+    parser.add_argument('--model_path', type=str, required=True,
+                       help='평가할 모델 파일(.pth) 경로')
     
     # 평가 설정
     parser.add_argument('--batch_size', type=int, default=32,
@@ -68,8 +68,9 @@ def main():
         print(f"오류: 오디오 폴더 '{args.audio_folder}'가 존재하지 않습니다.")
         return 1
     
-    if not os.path.exists(args.model_dir):
-        print(f"오류: 모델 디렉토리 '{args.model_dir}'가 존재하지 않습니다.")
+    # 파일 존재 여부 확인
+    if not os.path.exists(args.model_path):
+        print(f"오류: 모델 파일 '{args.model_path}'가 존재하지 않습니다.")
         return 1
 
     # --- Pandas 출력 옵션 설정 ---
@@ -126,10 +127,12 @@ def main():
     # 모델 생성 및 로드
     print("모델 로드 중...")
     model = FaceVoiceModel()
-    model = load_model_components(model, args.model_dir, device)
     
-    if model is None:
-        print("모델 로드에 실패했습니다.")
+    try:
+        # 표준 PyTorch 방식으로 모델 가중치 로드
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
+    except Exception as e:
+        print(f"모델 로드에 실패했습니다: {e}")
         return 1
     
     model.to(device).eval()

@@ -15,8 +15,7 @@ from .face_deduplicator import FaceDeduplicator
 
 # 모델 성능 평가 관련 함수들
 from .evaluator import (
-    evaluate_summary_metrics, evaluate_retrieval_ranking, 
-    calculate_retrieval_metrics, print_evaluation_summary
+    calculate_all_metrics, print_evaluation_summary, save_results_to_csv
 )
 
 # 매칭된 파일 처리 관련 유틸리티 함수들
@@ -27,7 +26,6 @@ from .matched_file_utils import (
 # 외부에서 import할 수 있는 클래스와 함수들의 목록
 __all__ = [
     'FaceExtractor', 'FaceDeduplicator',
-    'evaluate_summary_metrics', 'evaluate_retrieval_ranking', 
-    'calculate_retrieval_metrics', 'print_evaluation_summary',
+    'calculate_all_metrics', 'print_evaluation_summary', save_results_to_csv,
     'load_id_list_from_json', 'get_matched_pair', 'save_matched_files_by_index'
 ]

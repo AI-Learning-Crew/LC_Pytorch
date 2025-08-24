@@ -102,6 +102,17 @@ python scripts/training/train_face_voice.py \
     --pretrained_lr 1e-5
 ```
 
+**학습 중단 후 재개 (TensorBoard 지원):**
+```bash
+python scripts/training/train_face_voice.py \
+    --image_folder /path/to/images \
+    --audio_folder /path/to/audio \
+    --save_dir /path/to/save \ # 재개 시 --save_dir는 무시되나 설정값은 필요
+    --resume_dir /path/to/save/yyyymmdd_hhmmss \
+    --batch_size 32 \
+    --num_epochs 100
+```
+
 **커스텀 TensorBoard 디렉토리 지정:**
 ```bash
 python scripts/training/train_face_voice.py \
@@ -146,6 +157,7 @@ python scripts/training/train_face_voice_from_matched_file.py \
 - `--audio_folder`: 음성 파일 폴더 경로
 - `--matched_file`: 매칭된 파일 목록 경로
 - `--save_dir`: 모델 저장 디렉토리
+- `--resume_dir`: 학습을 재개할 체크포인트 디렉토리 경로
 - `--embedding_dim`: 임베딩 차원 (기본값: 512)
 - `--temperature`: InfoNCE 온도 파라미터 (기본값: 0.07)
 - `--batch_size`: 배치 크기 (기본값: 32)
@@ -183,7 +195,7 @@ python scripts/tensorboard/run_tensorboard_colab.py --log_dir /path/to/logs
 python scripts/evaluation/evaluate_face_voice.py \
     --image_folder /path/to/images \
     --audio_folder /path/to/audio \
-    --model_dir /path/to/model \
+    --model_path /path/to/model \
     --batch_size 32 \
     --test_size 0.7 \
     --top_k 5 \
@@ -193,7 +205,7 @@ python scripts/evaluation/evaluate_face_voice.py \
 **주요 파라미터:**
 - `--image_folder`: 얼굴 이미지 폴더 경로
 - `--audio_folder`: 음성 파일 폴더 경로
-- `--model_dir`: 학습된 모델 디렉토리
+- `--model_path`: 평가할 모델 파일(.pth) 경로
 - `--batch_size`: 배치 크기 (기본값: 32)
 - `--test_size`: 테스트 데이터 비율 (기본값: 0.05)
 - `--top_k`: 상위 K개 결과 평가 (기본값: 5)

@@ -9,12 +9,12 @@
 """
 
 # 기본 얼굴-음성 매칭 모델 관련 클래스들
-from .face_voice_model import FaceVoiceModel, InfoNCELoss, save_model_components, load_model_components
+from .face_voice_model import FaceVoiceModel, InfoNCELoss
 # 고품질 VoxCeleb 모델 관련 클래스들
 from .hq.hq_voxceleb_model import HQVoxCelebModel, HQVoxCelebInfoNCELoss, save_hq_voxceleb_model_components
 
 # 외부에서 import할 수 있는 클래스와 함수들의 목록
 __all__ = [
-    'FaceVoiceModel', 'InfoNCELoss', 'save_model_components', 'load_model_components',
+    'FaceVoiceModel', 'InfoNCELoss',
     'HQVoxCelebModel', 'HQVoxCelebInfoNCELoss', 'save_hq_voxceleb_model_components'
 ]

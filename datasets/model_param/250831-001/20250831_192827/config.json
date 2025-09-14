@@ -1,0 +1,22 @@
+{
+    "train_matched_file": "datasets/output/train-002/train-new.txt",
+    "val_matched_file": "datasets/output/train-002/val-new.txt",
+    "save_dir": "datasets/model_param/250831-001",
+    "embedding_dim": 512,
+    "temperature": 0.07,
+    "batch_size": 64,
+    "num_epochs": 100,
+    "learning_rate": 0.001,
+    "pretrained_lr": 1e-05,
+    "test_size": 0.2,
+    "random_state": 42,
+    "disable_image_augmentation": true,
+    "disable_audio_augmentation": true,
+    "audio_duration_sec": 5,
+    "target_sr": 16000,
+    "skip_file_matching": true,
+    "matched_files_path": null,
+    "tensorboard_dir": null,
+    "no_tensorboard": true,
+    "resume_dir": null
+}

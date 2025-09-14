@@ -4,6 +4,9 @@ data/HQVoxCeleb/split.json
 data/HQVoxCeleb/vox1
 data/HQVoxCeleb/vox2
 
+
+**/*.pth
+
 # Python
 __pycache__/
 *.py[cod]

@@ -231,3 +231,6 @@ python scripts/evaluation/evaluate_face_voice.py \
 
 TensorBoard를 통해 학습 과정을 시각적으로 확인하여 모델 성능을 최적화할 수 있습니다.
 
+## 학습된 파라미터
+
+[Parameters Archive](https://www.notion.so/arthur-kim/26edaa50ef2680148200c86d9571c040)

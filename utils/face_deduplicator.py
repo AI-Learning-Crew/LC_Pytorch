@@ -130,8 +130,8 @@ class FaceDeduplicator:
         print(f"총 {valid_embeddings_count}개의 얼굴에 대한 임베딩 계산 완료.")
         
         return all_embeddings
-    
-    def _identify_and_copy_faces(self, 
+
+    def _identify_and_copy_faces(self,
                                 faces_dir: str, 
                                 face_files_jpg: List[str], 
                                 all_embeddings: Dict[str, Optional[np.ndarray]],
@@ -196,7 +196,7 @@ class FaceDeduplicator:
                 copied_files_to_representative_count += 1
                 
                 processed_source_files.add(current_face_filename)
-                
+
                 print(f"  -- 대표 파일 복사 (dedupe): '{current_face_path_original}' -> '{destination_path_for_dedupe}'")
                 print(f"  -- 대표 파일 복사 (representative): '{current_face_path_original}' -> '{destination_path_for_representative}'")
                 

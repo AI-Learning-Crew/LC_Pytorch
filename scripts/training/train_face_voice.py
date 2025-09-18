@@ -24,6 +24,8 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 from tqdm.auto import tqdm
 
+from utils.file_remover import (delete_permanently_by_path)
+
 try:
     from models.face_voice_model import (
         FaceVoiceModel, InfoNCELoss
@@ -60,7 +62,7 @@ def save_atomic(data, path):
     except Exception as e:
         print(f"❌ 파일 저장 실패: {path} - {e}")
         if os.path.exists(temp_path):
-            os.remove(temp_path)
+            delete_permanently_by_path(temp_path)
         raise
 
 class CheckpointManager:
@@ -116,7 +118,7 @@ class CheckpointManager:
         if len(checkpoints) > self.max_to_keep:
             for ckpt_to_delete in checkpoints[:-self.max_to_keep]:
                 print(f"오래된 체크포인트 삭제: {os.path.basename(ckpt_to_delete)}")
-                os.remove(ckpt_to_delete)
+                delete_permanently_by_path(ckpt_to_delete)
 
 def save_best_model_weights(model, filepath):
     """추론을 위한 최고 성능 모델의 가중치(state_dict)만 단일 파일로 원자적으로 저장합니다."""

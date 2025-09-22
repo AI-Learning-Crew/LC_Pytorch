@@ -1,3 +1,5 @@
+# Captum 모델 해석 가능성 라이브러리
+captum>=0.8.0
 # PyTorch 딥러닝 프레임워크 (GPU 지원)
 torch>=1.9.0
 # PyTorch 컴퓨터 비전 라이브러리

@@ -6,6 +6,7 @@
 import argparse
 import os
 import sys
+import random
 from pathlib import Path
 
 # 프로젝트 루트를 Python 경로에 추가
@@ -40,8 +41,8 @@ def main():
     # 평가 설정
     parser.add_argument('--batch_size', type=int, default=32,
                        help='배치 크기 (기본값: 32)')
-    parser.add_argument('--test_size', type=float, default=0.05,
-                       help='테스트 데이터 비율 (기본값: 0.05)')
+    parser.add_argument('--num_samples', type=int, default=None,
+                        help='평가에 사용할 샘플 개수. 지정하지 않으면 전체 데이터를 사용합니다.')
     parser.add_argument('--random_state', type=int, default=42,
                        help='랜덤 시드 (기본값: 42)')
     parser.add_argument('--top_k', type=int, default=5,
@@ -96,15 +97,15 @@ def main():
     if len(matched_files) == 0:
         print("매칭된 파일이 없습니다. 경로를 확인해주세요.")
         return 1
-    
-    # 데이터 분할 (학습 시와 동일한 random_state 사용)
-    train_files, test_files = train_test_split(
-        matched_files, 
-        test_size=args.test_size, 
-        random_state=args.random_state
-    )
-    
-    print(f"테스트에 사용될 데이터: {len(test_files)}개")
+
+    # 데이터 샘플링
+    random.seed(args.random_state)
+    if args.num_samples and args.num_samples < len(matched_files):
+        test_files = random.sample(matched_files, args.num_samples)
+        print(f"전체 {len(matched_files)}개 중 {args.num_samples}개를 랜덤 샘플링하여 평가를 진행합니다.")
+    else:
+        test_files = matched_files
+        print(f"전체 데이터 {len(matched_files)}개를 대상으로 평가를 진행합니다.")
     
     # 테스트 데이터셋 생성
     test_dataset = FaceVoiceDataset(
@@ -142,12 +143,15 @@ def main():
     # 통합 평과 결과 출력
     print_evaluation_summary(metrics_i2a, metrics_a2i, auc_score, args.top_k)
     
-    # 상세 평가 내용 출력 (처음 50개만)
-    print(f"\n--- 이미지 -> 음성 검색 결과 (Top-{ranking_display_ks_str}) ---")
-    print(df_i2a.head(50).to_string())
+    # 상세 평가 내용 출력
+    max_k_for_df = max(all_top_ks)
+    print(f"\n--- 이미지 -> 음성 검색 결과 (Top & Bottom {max_k_for_df} Ranks) ---")
+    # print(df_i2a.head(50).to_string())
+    print(df_i2a.to_string())
 
-    print(f"\n--- 음성 -> 이미지 검색 결과 (Top-{ranking_display_ks_str}) ---")
-    print(df_a2i.head(50).to_string())
+    print(f"\n--- 음성 -> 이미지 검색 결과 (Top & Bottom {max_k_for_df} Ranks) ---")
+    # print(df_a2i.head(50).to_string())
+    print(df_a2i.to_string())
     
     # CSV 파일로 저장
     if args.output_file:

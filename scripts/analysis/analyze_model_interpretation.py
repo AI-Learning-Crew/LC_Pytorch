@@ -253,7 +253,7 @@ def main():
             audio_augmentations=None,
             audio_duration_sec=args.audio_duration_sec,
             target_sr=args.target_sr,
-            return_raw_audio=True  # 스펙트로그램 생성을 위해 원본 배열도 반환
+            return_processed_audio=True  # 스펙트로그램 생성을 위해 원본 배열도 반환
         )
         image_tensor, audio_tensor, speech_array = dataset[0]
     except Exception as e:

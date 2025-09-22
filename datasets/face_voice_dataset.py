@@ -24,7 +24,7 @@ class FaceVoiceDataset(Dataset):
                  audio_augmentations=None,
                  audio_duration_sec: int = 5,
                  target_sr: int = 16000,
-                 return_raw_audio: bool = False):
+                 return_processed_audio: bool = False):
         """
         FaceVoiceDataset 초기화
         
@@ -44,7 +44,7 @@ class FaceVoiceDataset(Dataset):
         self.audio_duration_sec = audio_duration_sec
         self.target_sr = target_sr
         self.max_length = self.target_sr * audio_duration_sec
-        self.return_raw_audio = return_raw_audio
+        self.return_processed_audio = return_processed_audio
         
     def __len__(self):
         return len(self.file_pairs)

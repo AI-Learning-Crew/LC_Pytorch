@@ -76,12 +76,19 @@ def calculate_all_metrics(model, test_dataset, device, top_ks: List[int]) -> Tup
         # --- 이미지 -> 음성 평가 ---
         row_data_i2a = {'Image_File': os.path.basename(image_file_paths[i])}
         is_correct_i2a = {k: False for k in top_ks}
+        # 상위 K개 결과
         for rank, audio_idx in enumerate(sorted_audio_indices[i, :max_k_for_df]):
             row_data_i2a[f'Rank_{rank+1}_Audio'] = os.path.basename(audio_file_paths[audio_idx])
             row_data_i2a[f'Rank_{rank+1}_Score'] = similarity_matrix[i, audio_idx].item()
             if audio_idx == i:
                 for k in top_ks:
                     if rank < k: is_correct_i2a[k] = True
+        # 하위 K개 결과
+        for rank, audio_idx in enumerate(sorted_audio_indices[i, -max_k_for_df:]):
+            bottom_rank_num = max_k_for_df - rank
+            row_data_i2a[f'Bottom_Rank_{bottom_rank_num}_Audio'] = os.path.basename(audio_file_paths[audio_idx])
+            row_data_i2a[f'Bottom_Rank_{bottom_rank_num}_Score'] = similarity_matrix[i, audio_idx].item()
+
         for k in top_ks:
             col_name = f'Correct_at_Rank_{k}' if k == 1 else f'Correct_in_Top_{k}'
             row_data_i2a[col_name] = "✅" if is_correct_i2a[k] else "❌"
@@ -90,12 +97,18 @@ def calculate_all_metrics(model, test_dataset, device, top_ks: List[int]) -> Tup
         # --- 음성 -> 이미지 평가 ---
         row_data_a2i = {'Audio_File': os.path.basename(audio_file_paths[i])}
         is_correct_a2i = {k: False for k in top_ks}
+        # 상위 K개 결과
         for rank, image_idx in enumerate(sorted_image_indices[i, :max_k_for_df]):
             row_data_a2i[f'Rank_{rank+1}_Image'] = os.path.basename(image_file_paths[image_idx])
             row_data_a2i[f'Rank_{rank+1}_Score'] = similarity_matrix[image_idx, i].item()
             if image_idx == i:
                 for k in top_ks:
                     if rank < k: is_correct_a2i[k] = True
+        # 하위 K개 결과
+        for rank, image_idx in enumerate(sorted_image_indices[i, -max_k_for_df:]):
+            bottom_rank_num = max_k_for_df - rank
+            row_data_a2i[f'Bottom_Rank_{bottom_rank_num}_Image'] = os.path.basename(image_file_paths[image_idx])
+            row_data_a2i[f'Bottom_Rank_{bottom_rank_num}_Score'] = similarity_matrix[image_idx, i].item()
         for k in top_ks:
             col_name = f'Correct_at_Rank_{k}' if k == 1 else f'Correct_in_Top_{k}'
             row_data_a2i[col_name] = "✅" if is_correct_a2i[k] else "❌"
@@ -117,8 +130,16 @@ def calculate_all_metrics(model, test_dataset, device, top_ks: List[int]) -> Tup
         cols = [query_col]
         for k in sorted(top_ks):
             cols.append(f'Correct_at_Rank_{k}' if k == 1 else f'Correct_in_Top_{k}')
+        # 상위 K개 컬럼 추가
         for i in range(1, max_k_for_df + 1):
             cols.extend([f'Rank_{i}_{rank_col_prefix}', f'Rank_{i}_Score'])
+        # 구분자 컬럼 추가
+        separator_col_name = '...'
+        cols.append(separator_col_name)
+        df[separator_col_name] = '...'
+        # 하위 K개 컬럼 추가
+        for i in reversed(range(1, max_k_for_df + 1)):
+            cols.extend([f'Bottom_Rank_{i}_{rank_col_prefix}', f'Bottom_Rank_{i}_Score'])
         return df.reindex(columns=cols).fillna('')
 
     df_i2a = create_df(eval_results_i2a, 'Image_File', 'Audio')

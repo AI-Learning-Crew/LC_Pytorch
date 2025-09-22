@@ -23,7 +23,8 @@ class FaceVoiceDataset(Dataset):
                  image_transform, 
                  audio_augmentations=None,
                  audio_duration_sec: int = 5,
-                 target_sr: int = 16000):
+                 target_sr: int = 16000,
+                 return_raw_audio: bool = False):
         """
         FaceVoiceDataset 초기화
         
@@ -34,6 +35,7 @@ class FaceVoiceDataset(Dataset):
             audio_augmentations: 오디오 증강 파이프라인
             audio_duration_sec: 오디오 길이 (초)
             target_sr: 오디오 샘플링 레이트
+            return_processed_audio (bool): True일 경우, 길이 조절된 오디오 배열을 함께 반환
         """
         self.file_pairs = file_pairs
         self.processor = processor
@@ -42,6 +44,7 @@ class FaceVoiceDataset(Dataset):
         self.audio_duration_sec = audio_duration_sec
         self.target_sr = target_sr
         self.max_length = self.target_sr * audio_duration_sec
+        self.return_raw_audio = return_raw_audio
         
     def __len__(self):
         return len(self.file_pairs)
@@ -80,7 +83,13 @@ class FaceVoiceDataset(Dataset):
             return_tensors="pt"
         ).input_values.squeeze(0)
         
-        return image_tensor, audio_input
+        # return_processed_audio 플래그에 따라 반환 값을 결정
+        if self.return_processed_audio:
+            # 오디오 배열(speech_array)을 추가로 반환
+            return image_tensor, audio_input, speech_array
+        else:
+            # 기존과 같이 이미지와 오디오 텐서만 반환
+            return image_tensor, audio_input
 
 
 def collate_fn(batch):

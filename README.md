@@ -197,7 +197,7 @@ python scripts/evaluation/evaluate_face_voice.py \
     --audio_folder /path/to/audio \
     --model_path /path/to/model \
     --batch_size 32 \
-    --test_size 0.7 \
+    --num_samples 50 \
     --top_k 5 \
     --output_file results.csv
 ```
@@ -207,11 +207,29 @@ python scripts/evaluation/evaluate_face_voice.py \
 - `--audio_folder`: 음성 파일 폴더 경로
 - `--model_path`: 평가할 모델 파일(.pth) 경로
 - `--batch_size`: 배치 크기 (기본값: 32)
-- `--test_size`: 테스트 데이터 비율 (기본값: 0.05)
+- `--num_samples`: 평가에 사용할 샘플 개수. 지정하지 않으면 전체 데이터를 사용
 - `--top_k`: 상위 K개 결과 평가 (기본값: 5)
 - `--output_file`: 결과 CSV 파일 저장 경로
 - `--audio_duration_sec`: 오디오 길이 (초, 기본값: 5)
 - `--target_sr`: 오디오 샘플링 레이트 (기본값: 16000)
+
+### 7. 모델 해석(얼굴-음성 쌍에 대한 모델 해석 시각화)
+
+```bash
+python scripts/analysis/analyze_model_interpretation.py \
+    --image_path /path/to/image.jpg \
+    --audio_path /path/to/audio.wav \
+    --model_path /path/to/model.pth \
+    --output_dir /path/to/output
+```
+
+**주요 파라미터:**
+- `--image_folder`: 얼굴 이미지 폴더 경로
+- `--audio_folder`: 음성 파일 폴더 경로
+- `--model_path`: 해석할 모델 파일(.pth) 경로
+- `--output_dir`: 해석 결과 저장 폴더 경로
+- `--audio_duration_sec`: 입력 오디오 길이, 학습 시와 동일값 설정 (초, 기본값: 5)
+- `--target_sr`: 입력 오디오 샘플링 레이트, 학습 시와 동일값 설정 (기본값: 16000)
 
 ## 모델 아키텍처
 

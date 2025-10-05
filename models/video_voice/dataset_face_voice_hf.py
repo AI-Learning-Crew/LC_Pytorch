@@ -16,14 +16,47 @@ import torchaudio
 # ---- Meta helpers -----------------------------------------------------------
 
 def flatten_meta(meta_obj: List[Dict[str, Any]]):
-    """Flatten meta list of dicts into list of {id, session, faces, voice} records.
-
-    Input example:
-    [
-      {"id00019": {"00001": {"faces": [...], "voice": "id00019/voices/00001.wav"}}},
-      {"id00020": {...}}
-    ]
     """
+    Convert a nested meta structure into a flat list of sample records.
+
+    This function takes a list of dictionaries, where each dictionary maps an identity ID
+    (e.g., "id00019") to its session data. Each session contains multiple face frame paths
+    and a corresponding voice file path.
+
+    Example Input:
+    [
+        {
+            "id00019": {
+                "00001": {
+                    "faces": ["id00019/faces/00001/frame_0000.jpg", ...],
+                    "voice": "id00019/voices/00001.wav"
+                },
+                "00002": {
+                    ...
+                }
+            }
+        },
+        {
+            "id00020": {
+                ...
+            }
+        }
+    ]
+
+    Example Output:
+    [
+        {"id": "id00019", "session": "00001", "faces": [...], "voice": "..."},
+        {"id": "id00019", "session": "00002", "faces": [...], "voice": "..."},
+        {"id": "id00020", "session": "00001", "faces": [...], "voice": "..."},
+        ...
+    ]
+
+    Returns:
+        List[Dict[str, Any]]: a flattened list where each element contains
+        the fields {id, session, faces, voice}.
+    """
+    
+    meta_obj = [{k: v} for k, v in meta_obj.items()]  # ensure list of dicts
     records = []
     for id_block in meta_obj:
         for pid, sessions in id_block.items():

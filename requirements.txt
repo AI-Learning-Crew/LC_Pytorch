@@ -28,3 +28,5 @@ pandas>=1.3.0
 accelerate>=0.20.0
 # 오디오 증강 라이브러리
 audiomentations>=0.42.0
+# torchaudio 오디오 처리 라이브러리
+torchaudio==2.8.0

@@ -11,11 +11,22 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+import argparse
+import os
+import sys
+from pathlib import Path
+
 from transformers import (
     ViTModel, ViTImageProcessor,
     Wav2Vec2Model, Wav2Vec2Processor,
     get_cosine_schedule_with_warmup,
 )
+
+# 프로젝트 루트를 Python 경로에 추가
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from models.video_voice.dataset_face_voice_hf import FaceVoiceDatasetHF, make_collate_fn
 
 # If running as a single file, the definitions above would be in the same module.
 # Otherwise, import as:
@@ -138,6 +149,7 @@ class TrainConfig:
     num_workers: int = 4
     grad_accum_steps: int = 1
     mixed_precision: bool = True
+    save_dir: str = "checkpoints"
 
 
 def main(cfg: TrainConfig):
@@ -182,28 +194,35 @@ def main(cfg: TrainConfig):
     step = 0
     for epoch in range(cfg.max_epochs):
         for batch in dl:
-            # move to device
-            pixel_values_list = [t.to(device, non_blocking=True) for t in batch["pixel_values_list"]]
-            audio_input_values = batch["audio_input_values"].to(device, non_blocking=True)
-            audio_attention_mask = batch["audio_attention_mask"].to(device, non_blocking=True)
+            try:
+                # move to device
+                pixel_values_list = [t.to(device, non_blocking=True) for t in batch["pixel_values_list"]]
+                audio_input_values = batch["audio_input_values"].to(device, non_blocking=True)
+                audio_attention_mask = batch["audio_attention_mask"].to(device, non_blocking=True)
 
-            with torch.cuda.amp.autocast(enabled=cfg.mixed_precision):
-                img_z = model.encode_images(pixel_values_list)
-                aud_z = model.encode_audios(audio_input_values, audio_attention_mask)
-                loss, acc = contrastive_loss(img_z, aud_z, tau=cfg.tau)
+                with torch.cuda.amp.autocast(enabled=cfg.mixed_precision):
+                    img_z = model.encode_images(pixel_values_list)
+                    aud_z = model.encode_audios(audio_input_values, audio_attention_mask)
+                    loss, acc = contrastive_loss(img_z, aud_z, tau=cfg.tau)
 
-            scaler.scale(loss).step(opt)
-            scaler.update()
-            opt.zero_grad(set_to_none=True)
-            sched.step()
+                scaler.scale(loss).step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
+                sched.step()
 
-            step += 1
-            if step % 50 == 0:
-                print(f"epoch {epoch} step {step}: loss={loss.item():.4f} acc@1={acc.item():.3f}")
+                step += 1
+                if step % 50 == 0:
+                    print(f"epoch {epoch} step {step}: loss={loss.item():.4f} acc@1={acc.item():.3f}")
 
+            except Exception as e:
+                print(f"오류 발생: {e}")
+                print("해당 배치를 건너뜁니다.")
+                continue
     # save
-    save_dir = Path("checkpoints")
+    from pathlib import Path
+    save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+
     torch.save({
         "config": cfg.__dict__,
         "img_proj": model.img_proj.state_dict(),
@@ -217,14 +236,39 @@ def main(cfg: TrainConfig):
 
 if __name__ == "__main__":
     # Quick config override via env or edit directly
+    parser = argparse.ArgumentParser(description='얼굴-음성 매칭 모델을 학습합니다.')
+    
+    parser.add_argument('--meta_path', type=str, default=os.environ.get("META", "meta.json"),
+                    help='메타 파일 경로 (기본값: meta.json)')
+    parser.add_argument('--root_dir', type=str, default=os.environ.get("ROOT", "dataset_root"),
+                        help='데이터셋 루트 디렉토리 (기본값: dataset_root)')
+    parser.add_argument('--save_dir', type=str, default=os.environ.get("SAVE_DIR", "checkpoints"),
+                        help='모델 저장 경로 (기본값: checkpoints)')
+    parser.add_argument('--batch_size', type=int, default=int(os.environ.get("BATCH", 16)),
+                        help='배치 크기 (기본값: 16)')
+    parser.add_argument('--frames_per_sample', type=int, default=int(os.environ.get("K", 4)),
+                        help='샘플당 프레임 수 (기본값: 4)')
+    parser.add_argument('--max_epochs', type=int, default=int(os.environ.get("EPOCHS", 5)),
+                        help='최대 에포크 수 (기본값: 5)')
+    parser.add_argument('--freeze_backbones', type=lambda x: bool(int(x)), default=bool(int(os.environ.get("FREEZE", 0))),
+                        help='백본 동결 여부 (0: False, 1: True, 기본값: 0)')
+    parser.add_argument('--lr', type=float, default=float(os.environ.get("LR", 3e-5)),
+                        help='학습률 (기본값: 3e-5)')
+    parser.add_argument('--audio_seconds', type=float, default=float(os.environ.get("ASEC", 2.0)),
+                        help='오디오 길이 (초) (기본값: 2.0)')
+    
+    args = parser.parse_args()
+    
     cfg = TrainConfig(
-        meta_path=os.environ.get("META", "meta.json"),
-        root_dir=os.environ.get("ROOT", "dataset_root"),
-        batch_size=int(os.environ.get("BATCH", 16)),
-        frames_per_sample=int(os.environ.get("K", 4)),
-        max_epochs=int(os.environ.get("EPOCHS", 5)),
-        freeze_backbones=bool(int(os.environ.get("FREEZE", 0))),
-        lr=float(os.environ.get("LR", 3e-5)),
-        audio_seconds=float(os.environ.get("ASEC", 2.0)),
+        meta_path=args.meta_path,
+        root_dir=args.root_dir,
+        batch_size=args.batch_size,
+        frames_per_sample=args.frames_per_sample,
+        max_epochs=args.max_epochs,
+        freeze_backbones=args.freeze_backbones,
+        lr=args.lr,
+        audio_seconds=args.audio_seconds,
+        save_dir=args.save_dir,
     )
+    
     main(cfg)

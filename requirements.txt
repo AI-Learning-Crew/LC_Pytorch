@@ -30,3 +30,5 @@ accelerate>=0.20.0
 audiomentations>=0.42.0
 # torchaudio 오디오 처리 라이브러리
 torchaudio==2.8.0
+# 오디오 처리 라이브러리
+torchcodec

@@ -16,11 +16,15 @@ import os
 import sys
 from pathlib import Path
 
+import torch.nn.functional as F
+
 from transformers import (
     ViTModel, ViTImageProcessor,
     Wav2Vec2Model, Wav2Vec2Processor,
     get_cosine_schedule_with_warmup,
 )
+
+from tqdm import tqdm # tqdm 추가
 
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent.parent.parent
@@ -58,12 +62,12 @@ class FaceVoiceDualEncoder(nn.Module):
                  w2v_name: str = "facebook/wav2vec2-base",
                  embed_dim: int = 256,
                  freeze_backbones: bool = False,
-                 average_frame_embeddings: bool = True,
-                 ) -> None:
+                 average_frame_embeddings: bool = True):
         super().__init__()
         self.vit = ViTModel.from_pretrained(vit_name)
         self.w2v = Wav2Vec2Model.from_pretrained(w2v_name)
         self.average_frame_embeddings = average_frame_embeddings
+        self.freeze_backbones = freeze_backbones
 
         vit_out = self.vit.config.hidden_size
         w2v_out = self.w2v.config.hidden_size
@@ -77,55 +81,97 @@ class FaceVoiceDualEncoder(nn.Module):
             for p in self.w2v.parameters():
                 p.requires_grad = False
 
-    @torch.no_grad()
     def _vit_encode_frames(self, frames_tensor: torch.Tensor) -> torch.Tensor:
-        """frames_tensor: (K, 3, H, W) -> returns (K, D)
-        Uses CLS token embedding (last_hidden_state[:,0,:]).
         """
-        out = self.vit(frames_tensor, output_hidden_states=False)
-        cls = out.last_hidden_state[:, 0, :]  # (K, D)
+        frames_tensor: (K,3,H,W) or (B,3,H,W)
+        returns: (K,D) or (B,D) using CLS
+        """
+        ctx = torch.no_grad() if self.freeze_backbones else torch.enable_grad()
+        with ctx:
+            out = self.vit(pixel_values=frames_tensor, output_hidden_states=False)
+            cls = out.last_hidden_state[:, 0, :]
         return cls
 
-    def encode_images(self, pixel_values_list: list[torch.Tensor]) -> torch.Tensor:
-        """pixel_values_list: list of (Ki, 3, H, W) for each item in batch
-        Returns image embeddings (B, D) after frame-avg pooling + projection.
+    def encode_images(self, images) -> torch.Tensor:
         """
-        embs = []
-        for frames in pixel_values_list:
-            # encode each frame, then mean-pool
-            frame_feats = self._vit_encode_frames(frames)  # (K, D)
-            if self.average_frame_embeddings:
-                feat = frame_feats.mean(dim=0, keepdim=True)  # (1, D)
-            else:
-                feat = frame_feats.mean(dim=0, keepdim=True)  # placeholder; could do attention
-            embs.append(feat)
-        img_feats = torch.cat(embs, dim=0)  # (B, D)
-        img_z = self.img_proj(img_feats)    # (B, d)
-        return img_z
+        images:
+          - (B,3,H,W)        if averaged in collate, or
+          - (B,K,3,H,W)      if not averaged, or
+          - list[(K,3,H,W)]  legacy
+        returns: (B, d) L2-normalized
+        """
+        device = next(self.parameters()).device
 
-    def encode_audios(self, input_values: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        w2v_out = self.w2v(input_values=input_values, attention_mask=attention_mask)
-        hidden = w2v_out.last_hidden_state  # (B, T, C)
-        # masked mean pooling over time
-        mask = attention_mask.unsqueeze(-1).to(hidden.dtype)  # (B, T, 1)
-        sum_hidden = (hidden * mask).sum(dim=1)  # (B, C)
-        len_mask = mask.sum(dim=1).clamp_min(1.0)
-        pooled = sum_hidden / len_mask  # (B, C)
-        aud_z = self.aud_proj(pooled)   # (B, d)
-        return aud_z
+        if isinstance(images, list):
+            # legacy path: list of (K,3,H,W)
+            feats = []
+            for frames in images:
+                frames = frames.to(device)
+                f = self._vit_encode_frames(frames)  # (K,D)
+                if self.average_frame_embeddings or frames.ndim == 3:
+                    f = f.mean(dim=0, keepdim=True)   # (1,D)
+                else:
+                    f = f.mean(dim=0, keepdim=True)
+                feats.append(f)
+            img_feats = torch.cat(feats, dim=0)       # (B,D)
+
+        elif images.ndim == 4:  # (B,3,H,W)
+            B = images.size(0)
+            cls = self._vit_encode_frames(images.to(device))  # (B,D)
+            img_feats = cls
+
+        elif images.ndim == 5:  # (B,K,3,H,W)
+            B, K = images.shape[:2]
+            flat = images.view(B*K, *images.shape[2:]).to(device)  # (B*K,3,H,W)
+            cls = self._vit_encode_frames(flat).view(B, K, -1)     # (B,K,D)
+            img_feats = cls.mean(dim=1)                            # (B,D)
+        else:
+            raise ValueError(f"Unexpected images shape: {getattr(images, 'shape', None)}")
+
+        img_z = self.img_proj(img_feats)               # (B,d)
+        return F.normalize(img_z, p=2, dim=1)
+
+    def encode_audios(self, audio: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        audio: (B, T) padded with zeros
+        attention_mask: (B, T) with 1 for real, 0 for pad. If None, infer from audio!=0.
+        returns: (B, d) L2-normalized
+        """
+        device = next(self.parameters()).device
+        audio = audio.to(device)
+
+        if attention_mask is None:
+            attention_mask = (audio != 0.0).to(audio.dtype)
+        attention_mask = attention_mask.to(device)
+
+        ctx = torch.no_grad() if self.freeze_backbones else torch.enable_grad()
+        with ctx:
+            out = self.w2v(input_values=audio, attention_mask=attention_mask, output_hidden_states=False)
+            # 마스킹 평균
+            hidden = out.last_hidden_state  # (B, T', D); W2V는 stride로 T' < T일 수 있음
+            # Wav2Vec2는 내부 다운샘플로 attention_mask도 다운샘플 안 됨.
+            # 간단 대안: hidden의 시간축 mean (실무에선 CTC mask/특징 길이로 정교화 권장)
+            aud_feat = hidden.mean(dim=1)   # (B, D)
+
+        aud_z = self.aud_proj(aud_feat)     # (B, d)
+        return F.normalize(aud_z, p=2, dim=1)
+
+
 
 # ---- Loss ------------------------------------------------------------------
 
 def contrastive_loss(img_z: torch.Tensor, aud_z: torch.Tensor, tau: float = 0.07):
-    img_z = nn.functional.normalize(img_z, dim=-1)
-    aud_z = nn.functional.normalize(aud_z, dim=-1)
-    logits_ia = img_z @ aud_z.t() / tau
-    logits_ai = aud_z @ img_z.t() / tau
-    labels = torch.arange(img_z.size(0), device=img_z.device)
-    loss = (nn.functional.cross_entropy(logits_ia, labels) +
-            nn.functional.cross_entropy(logits_ai, labels)) * 0.5
-    acc = (logits_ia.argmax(dim=1) == labels).float().mean()
-    return loss, acc
+    # img_z, aud_z: (B, d)
+    img_z = F.normalize(img_z, dim=-1)
+    aud_z = F.normalize(aud_z, dim=-1)
+
+    logits = img_z @ aud_z.t() / tau   # (B, B)
+    targets = torch.arange(logits.size(0), device=logits.device)  # (B,)
+
+    loss_i = F.cross_entropy(logits, targets)         # 이미지→오디오
+    loss_a = F.cross_entropy(logits.t(), targets)     # 오디오→이미지
+    loss = (loss_i + loss_a) / 2.0
+    return loss
 
 # ---- Train loop ------------------------------------------------------------
 
@@ -163,8 +209,11 @@ def main(cfg: TrainConfig):
     ds = FaceVoiceDatasetHF(
         meta_path=cfg.meta_path,
         root_dir=cfg.root_dir,
+        
         frames_per_sample=cfg.frames_per_sample,
         frame_sample_mode=cfg.frame_sample_mode,
+        
+        audio_processor=wav2vec2_processor,
         audio_seconds=cfg.audio_seconds,
         target_sr=wav2vec2_processor.feature_extractor.sampling_rate,
         average_frames=True,
@@ -193,8 +242,24 @@ def main(cfg: TrainConfig):
     model.train()
     step = 0
     for epoch in range(cfg.max_epochs):
-        for batch in dl:
+        print(f"Epoch {epoch + 1}/{cfg.max_epochs}")
+        epoch_loss = 0.0
+        epoch_acc = 0.0
+        batch_count = 0
+
+        # tqdm을 사용하여 진행률 바 추가
+        for batch in tqdm(dl, desc=f"Training Epoch {epoch + 1}/{cfg.max_epochs}", leave=False):
             try:
+                # batch의 키와 각 값의 크기를 출력
+                print("Batch structure:")
+                for key, value in batch.items():
+                    if isinstance(value, torch.Tensor):
+                        print(f"  {key}: {value.shape}")
+                    elif isinstance(value, list):
+                        print(f"  {key}: List of length {len(value)}")
+                    else:
+                        print(f"  {key}: {type(value)}")
+                
                 # move to device
                 pixel_values_list = [t.to(device, non_blocking=True) for t in batch["pixel_values_list"]]
                 audio_input_values = batch["audio_input_values"].to(device, non_blocking=True)
@@ -211,13 +276,23 @@ def main(cfg: TrainConfig):
                 sched.step()
 
                 step += 1
+                epoch_loss += loss.item()
+                epoch_acc += acc.item()
+                batch_count += 1
+
                 if step % 50 == 0:
-                    print(f"epoch {epoch} step {step}: loss={loss.item():.4f} acc@1={acc.item():.3f}")
+                    print(f"Step {step}: Loss={loss.item():.4f}, Acc@1={acc.item():.3f}")
 
             except Exception as e:
                 print(f"오류 발생: {e}")
                 print("해당 배치를 건너뜁니다.")
                 continue
+
+        # 에포크별 평균 손실 및 정확도 출력
+        epoch_loss /= batch_count
+        epoch_acc /= batch_count
+        print(f"Epoch {epoch + 1} Completed: Avg Loss={epoch_loss:.4f}, Avg Acc@1={epoch_acc:.3f}")
+    
     # save
     from pathlib import Path
     save_dir = Path(cfg.save_dir)

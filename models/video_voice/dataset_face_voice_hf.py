@@ -9,9 +9,12 @@ import json, random
 from typing import List, Dict, Any, Tuple
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 from PIL import Image
-import torchaudio
+import librosa
+
+from transformers import Wav2Vec2Processor
 
 # ---- Meta helpers -----------------------------------------------------------
 
@@ -79,7 +82,8 @@ class FaceVoiceDatasetHF(Dataset):
         meta_path: str | Path,
         root_dir: str | Path,
         frames_per_sample: int = 4,
-        frame_sample_mode: str = "uniform",  # "uniform" | "random"
+        frame_sample_mode: str = "uniform",
+        audio_processor: Wav2Vec2Processor | None = None,
         audio_seconds: float = 2.0,
         target_sr: int = 16000,
         average_frames: bool = True,
@@ -95,7 +99,10 @@ class FaceVoiceDatasetHF(Dataset):
         self.num_audio_samples = int(self.target_sr * self.audio_seconds)
         self.average_frames = average_frames
 
-        self.resamplers = {}  # lazy build by sr
+        # 프로세서: 전달받지 않으면 여기서 한 번만 생성
+        self.audio_processor = audio_processor or Wav2Vec2Processor.from_pretrained(
+            "facebook/wav2vec2-base-960h"
+        )
 
     def __len__(self):
         return len(self.records)
@@ -121,81 +128,72 @@ class FaceVoiceDatasetHF(Dataset):
             self.resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=self.target_sr)
         return self.resamplers[sr]
 
-    def _load_audio(self, rel_path: str) -> torch.Tensor:
-        p = self.root / rel_path
-        wav, sr = torchaudio.load(str(p))  # (C, T)
-        if wav.size(0) > 1:
-            wav = wav.mean(0, keepdim=True)  # mono
-        resampler = self._get_resampler(sr)
-        if resampler is not None:
-            wav = resampler(wav)
-        wav = wav.squeeze(0)  # (T,)
-
-        # random crop (pad if short)
-        T = wav.numel()
-        N = self.num_audio_samples
-        if T >= N:
-            start = random.randint(0, T - N)
-            clip = wav[start:start+N]
-        else:
-            clip = torch.zeros(N)
-            clip[:T] = wav
-
-        # simple rms norm (keeps amplitude reasonable)
-        rms = clip.pow(2).mean().sqrt().clamp_min(1e-8)
-        clip = clip / rms
-        return clip  # (N,)
-
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         r = self.records[idx]
-        chosen = self._sample_frames(r["faces"])  # list of paths
+        chosen = self._sample_frames(r["faces"])
         images = [self._load_image(fp) for fp in chosen]
-        audio = self._load_audio(r["voice"])  # (N,)
+
+        audio_path = self.root / r["voice"]
+        # librosa가 float32 mono로 반환, sr로 리샘플링 완료
+        speech_array, _ = librosa.load(audio_path, sr=self.target_sr)
+
+        # 길이 고정
+        if len(speech_array) >= self.num_audio_samples:
+            speech_array = speech_array[: self.num_audio_samples]
+        else:
+            pad = self.num_audio_samples - len(speech_array)
+            speech_array = np.pad(speech_array, (0, pad), mode="constant")
+
+        audio_input = self.audio_processor(
+            speech_array, sampling_rate=self.target_sr, return_tensors="pt"
+        ).input_values.squeeze(0)  # (T,)
+
         return {
-            "images": images,      # list of PIL images (K)
-            "audio": audio,        # (N,)
+            "images": images,        # list[PIL.Image] (K)
+            "audio": audio_input,    # (T,)
             "pid": r["id"],
             "session": r["session"],
         }
 
 # ---- Collate with HF processors -------------------------------------------
+    
+import torch
+from torch.nn.utils.rnn import pad_sequence
 
-def make_collate_fn(
-    image_processor,           # transformers.ViTImageProcessor
-    wav2vec2_processor,        # transformers.Wav2Vec2Processor
-    average_frames: bool = True,
-):
-    def collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        # images: flatten all frames, process via processor, then regroup/average
-        all_frames: List[Image.Image] = []
-        frame_counts: List[int] = []
+def make_collate_fn(image_processor, average_frames: bool = True):
+    def collate(batch):
+        # ----- images -----
+        all_frames = []
+        frame_counts = []
         for b in batch:
             frames = b["images"]
             frame_counts.append(len(frames))
             all_frames.extend(frames)
 
-        pixel_inputs = image_processor(images=all_frames, return_tensors="pt")
-        pixel_values = pixel_inputs["pixel_values"]  # (sumK, 3, 224, 224)
+        px = image_processor(images=all_frames, return_tensors="pt")
+        pixel_values = px["pixel_values"]                 # (sumK, 3, H, W)
+        chunks = torch.split(pixel_values, frame_counts)  # list[(Ki,3,H,W)]
 
-        # regroup
-        chunks = torch.split(pixel_values, frame_counts)
         if average_frames:
-            # average frame embeddings later, so keep as images for encoder.
-            # Here we average the pixel tensors to keep memory lower (approximation)
-            # Alternatively, encode each frame then average embeddings (better).
-            # We'll choose **encode-each-then-average** in the model step, so keep stacks.
-            pass
+            # (Ki,3,H,W) -> (1,3,H,W) 평균, B개 concat → (B,3,H,W)
+            videos = torch.cat([c.mean(dim=0, keepdim=True) for c in chunks], dim=0)
+        else:
+            # K를 맞춰 패딩 → (B,K,3,H,W)
+            max_k = max(c.shape[0] for c in chunks)
+            padded_list = []
+            for c in chunks:
+                if c.shape[0] < max_k:
+                    pad = torch.zeros((max_k - c.shape[0], *c.shape[1:]), dtype=c.dtype, device=c.device)
+                    c = torch.cat([c, pad], dim=0)
+                padded_list.append(c)
+            videos = torch.stack(padded_list, dim=0)
 
-        # audio
-        audios = [b["audio"] for b in batch]
-        audio_inputs = wav2vec2_processor(
-            audios, sampling_rate=wav2vec2_processor.feature_extractor.sampling_rate,
-            return_tensors="pt", padding=True
-        )  # input_values: (B, Tpad) attention_mask: (B, Tpad)
+        # ----- audios -----
+        audios = [b["audio"] for b in batch]             # (T_i,)
+        padded_audios = pad_sequence(audios, batch_first=True, padding_value=0.0)  # (B, Tmax)
 
-        return {
-            "pixel_values_list": list(chunks),     # list of tensors with shape (Ki, 3, H, W)
-            "audio_input_values": audio_inputs.input_values,  # (B, T)
-            "audio_attention_mask": audio_inputs.attention_mask,  # (B, T)
-        }
+        meta = [{"pid": b["pid"], "session": b["session"]} for b in batch]
+
+        return {"images": videos, "audio": padded_audios, "meta": meta}
     return collate
+

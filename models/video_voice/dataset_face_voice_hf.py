@@ -8,6 +8,7 @@ from pathlib import Path
 import json, random
 from typing import List, Dict, Any, Tuple
 
+import numpy as np             # ⬅️ 추가
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
@@ -16,63 +17,45 @@ import librosa
 
 from transformers import Wav2Vec2Processor
 
+
 # ---- Meta helpers -----------------------------------------------------------
 
-def flatten_meta(meta_obj: List[Dict[str, Any]]):
+def flatten_meta(meta_obj):
     """
-    Convert a nested meta structure into a flat list of sample records.
-
-    This function takes a list of dictionaries, where each dictionary maps an identity ID
-    (e.g., "id00019") to its session data. Each session contains multiple face frame paths
-    and a corresponding voice file path.
-
-    Example Input:
-    [
-        {
-            "id00019": {
-                "00001": {
-                    "faces": ["id00019/faces/00001/frame_0000.jpg", ...],
-                    "voice": "id00019/voices/00001.wav"
-                },
-                "00002": {
-                    ...
-                }
-            }
-        },
-        {
-            "id00020": {
-                ...
-            }
-        }
-    ]
-
-    Example Output:
-    [
-        {"id": "id00019", "session": "00001", "faces": [...], "voice": "..."},
-        {"id": "id00019", "session": "00002", "faces": [...], "voice": "..."},
-        {"id": "id00020", "session": "00001", "faces": [...], "voice": "..."},
-        ...
-    ]
-
-    Returns:
-        List[Dict[str, Any]]: a flattened list where each element contains
-        the fields {id, session, faces, voice}.
+    meta_obj: dict({"idXXXX": {...}}) 또는 list[dict({...})] 모두 지원.
+    빈 faces/누락 voice는 스킵.
     """
-    
-    meta_obj = [{k: v} for k, v in meta_obj.items()]  # ensure list of dicts
+    # 형태 정규화
+    if isinstance(meta_obj, dict):
+        items = meta_obj.items()
+    elif isinstance(meta_obj, list):
+        merged = {}
+        for block in meta_obj:
+            if isinstance(block, dict):
+                for k, v in block.items():
+                    merged[k] = v
+        items = merged.items()
+    else:
+        raise TypeError(f"Unsupported meta type: {type(meta_obj)}")
+
     records = []
-    for id_block in meta_obj:
-        for pid, sessions in id_block.items():
-            for sess, d in sessions.items():
-                faces = d["faces"]
-                voice = d["voice"]
-                records.append({
-                    "id": pid,
-                    "session": sess,
-                    "faces": faces,
-                    "voice": voice,
-                })
+    for pid, sessions in items:
+        for sess, d in sessions.items():
+            faces = d.get("faces", []) or []
+            voice = d.get("voice", None)
+            # 빈 faces 또는 voice 누락은 스킵
+            if not faces or not voice:
+                continue
+            records.append({
+                "id": pid,
+                "session": sess,
+                "faces": faces,
+                "voice": voice,
+            })
+    if not records:
+        raise ValueError("No valid records found in meta (check faces/voice fields).")
     return records
+
 
 # ---- Dataset ---------------------------------------------------------------
 
@@ -121,13 +104,6 @@ class FaceVoiceDatasetHF(Dataset):
         img = Image.open(p).convert("RGB")
         return img
 
-    def _get_resampler(self, sr: int):
-        if sr == self.target_sr:
-            return None
-        if sr not in self.resamplers:
-            self.resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=self.target_sr)
-        return self.resamplers[sr]
-
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         r = self.records[idx]
         chosen = self._sample_frames(r["faces"])
@@ -157,9 +133,6 @@ class FaceVoiceDatasetHF(Dataset):
 
 # ---- Collate with HF processors -------------------------------------------
     
-import torch
-from torch.nn.utils.rnn import pad_sequence
-
 def make_collate_fn(image_processor, average_frames: bool = True):
     def collate(batch):
         # ----- images -----
@@ -170,30 +143,42 @@ def make_collate_fn(image_processor, average_frames: bool = True):
             frame_counts.append(len(frames))
             all_frames.extend(frames)
 
+        if sum(frame_counts) == 0:
+            raise RuntimeError("All items have zero frames in this batch.")
+
         px = image_processor(images=all_frames, return_tensors="pt")
         pixel_values = px["pixel_values"]                 # (sumK, 3, H, W)
         chunks = torch.split(pixel_values, frame_counts)  # list[(Ki,3,H,W)]
 
         if average_frames:
-            # (Ki,3,H,W) -> (1,3,H,W) 평균, B개 concat → (B,3,H,W)
-            videos = torch.cat([c.mean(dim=0, keepdim=True) for c in chunks], dim=0)
+            # Ki가 0인 경우를 방어 (이상치 스킵 또는 제로패드)
+            pooled = []
+            for c in chunks:
+                if c.shape[0] == 0:
+                    # 제로로 대체 (드문 케이스)
+                    pooled.append(torch.zeros((1, *c.shape[1:]), dtype=c.dtype, device=c.device))
+                else:
+                    pooled.append(c.mean(dim=0, keepdim=True))
+            videos = torch.cat(pooled, dim=0)  # (B,3,H,W)
         else:
-            # K를 맞춰 패딩 → (B,K,3,H,W)
-            max_k = max(c.shape[0] for c in chunks)
+            max_k = max((c.shape[0] for c in chunks), default=0)
+            if max_k == 0:
+                raise RuntimeError("No frames to pad in non-averaging path.")
             padded_list = []
             for c in chunks:
                 if c.shape[0] < max_k:
-                    pad = torch.zeros((max_k - c.shape[0], *c.shape[1:]), dtype=c.dtype, device=c.device)
+                    pad = torch.zeros((max_k - c.shape[0], *c.shape[1:]),
+                                      dtype=c.dtype, device=c.device)
                     c = torch.cat([c, pad], dim=0)
                 padded_list.append(c)
-            videos = torch.stack(padded_list, dim=0)
+            videos = torch.stack(padded_list, dim=0)  # (B,K,3,H,W)
 
         # ----- audios -----
-        audios = [b["audio"] for b in batch]             # (T_i,)
+        audios = [b["audio"] for b in batch]  # list[(T_i,)]
         padded_audios = pad_sequence(audios, batch_first=True, padding_value=0.0)  # (B, Tmax)
 
         meta = [{"pid": b["pid"], "session": b["session"]} for b in batch]
-
         return {"images": videos, "audio": padded_audios, "meta": meta}
     return collate
+
 

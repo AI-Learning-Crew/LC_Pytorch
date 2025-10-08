@@ -218,7 +218,7 @@ def main(cfg: TrainConfig):
         target_sr=wav2vec2_processor.feature_extractor.sampling_rate,
         average_frames=True,
     )
-    collate_fn = make_collate_fn(image_processor, wav2vec2_processor, average_frames=True)
+    collate_fn = make_collate_fn(image_processor, average_frames=True)
     dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers,
                     collate_fn=collate_fn, drop_last=True, pin_memory=True)
 
@@ -250,29 +250,40 @@ def main(cfg: TrainConfig):
         # tqdm을 사용하여 진행률 바 추가
         for batch in tqdm(dl, desc=f"Training Epoch {epoch + 1}/{cfg.max_epochs}", leave=False):
             try:
-                # batch의 키와 각 값의 크기를 출력
-                print("Batch structure:")
-                for key, value in batch.items():
-                    if isinstance(value, torch.Tensor):
-                        print(f"  {key}: {value.shape}")
-                    elif isinstance(value, list):
-                        print(f"  {key}: List of length {len(value)}")
-                    else:
-                        print(f"  {key}: {type(value)}")
-                
-                # move to device
-                pixel_values_list = [t.to(device, non_blocking=True) for t in batch["pixel_values_list"]]
-                audio_input_values = batch["audio_input_values"].to(device, non_blocking=True)
-                audio_attention_mask = batch["audio_attention_mask"].to(device, non_blocking=True)
+                # --- 디버그 출력 (원하면 유지/비활성)
+                # print("Batch structure:")
+                # for key, value in batch.items():
+                #     if isinstance(value, torch.Tensor):
+                #         print(f"  {key}: {value.shape}")
+                #     elif isinstance(value, list):
+                #         print(f"  {key}: List of length {len(value)}")
+                #     else:
+                #         print(f"  {key}: {type(value)}")
+
+                # collate 반환 키에 맞게 수정
+                images = batch["images"].to(device, non_blocking=True)  # (B,3,H,W) 또는 (B,K,3,H,W)
+                audios = batch["audio"].to(device, non_blocking=True)   # (B,T)
+                attn_mask = (audios != 0).to(torch.long)                 # zero-padding 기반 마스크
+
+                opt.zero_grad(set_to_none=True)
 
                 with torch.cuda.amp.autocast(enabled=cfg.mixed_precision):
-                    img_z = model.encode_images(pixel_values_list)
-                    aud_z = model.encode_audios(audio_input_values, audio_attention_mask)
-                    loss, acc = contrastive_loss(img_z, aud_z, tau=cfg.tau)
+                    img_z = model.encode_images(images)
+                    aud_z = model.encode_audios(audios, attention_mask=attn_mask)
+                    loss = contrastive_loss(img_z, aud_z, tau=cfg.tau)
 
-                scaler.scale(loss).step(opt)
+                    # 선택: Top-1 정합(acc) 계산 (모니터링용)
+                    with torch.no_grad():
+                        logits = (F.normalize(img_z, dim=-1) @ F.normalize(aud_z, dim=-1).t())
+                        tgt = torch.arange(logits.size(0), device=logits.device)
+                        acc_i = (logits.argmax(dim=1) == tgt).float().mean()
+                        acc_a = (logits.argmax(dim=0) == tgt).float().mean()
+                        acc = 0.5 * (acc_i + acc_a)
+
+                # AMP backward & step
+                scaler.scale(loss).backward()
+                scaler.step(opt)
                 scaler.update()
-                opt.zero_grad(set_to_none=True)
                 sched.step()
 
                 step += 1
@@ -287,6 +298,7 @@ def main(cfg: TrainConfig):
                 print(f"오류 발생: {e}")
                 print("해당 배치를 건너뜁니다.")
                 continue
+
 
         # 에포크별 평균 손실 및 정확도 출력
         epoch_loss /= batch_count

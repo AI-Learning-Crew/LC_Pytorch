@@ -46,12 +46,13 @@ def flatten_meta(meta_obj):
             # 빈 faces 또는 voice 누락은 스킵
             if not faces or not voice:
                 continue
-            records.append({
+            record = {
                 "id": pid,
                 "session": sess,
                 "faces": faces,
                 "voice": voice,
-            })
+            }
+            records.append(record)
     if not records:
         raise ValueError("No valid records found in meta (check faces/voice fields).")
     return records
@@ -124,6 +125,7 @@ class FaceVoiceDatasetHF(Dataset):
             speech_array, sampling_rate=self.target_sr, return_tensors="pt"
         ).input_values.squeeze(0)  # (T,)
 
+        print(f"Loaded sample {r["id"]}: {len(images)} images, audio shape {audio_input.shape}")
         return {
             "images": images,        # list[PIL.Image] (K)
             "audio": audio_input,    # (T,)
@@ -180,5 +182,3 @@ def make_collate_fn(image_processor, average_frames: bool = True):
         meta = [{"pid": b["pid"], "session": b["session"]} for b in batch]
         return {"images": videos, "audio": padded_audios, "meta": meta}
     return collate
-
-

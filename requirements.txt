@@ -1,7 +1,7 @@
 # PyTorch 딥러닝 프레임워크 (GPU 지원)
 torch>=1.9.0
 # PyTorch 컴퓨터 비전 라이브러리
-torchvision>=0.10.0
+torchvision>=0.16.0
 # OpenCV 컴퓨터 비전 라이브러리 (이미지 처리)
 opencv-python>=4.5.0
 # DeepFace 얼굴 인식 및 분석 라이브러리
@@ -17,7 +17,7 @@ matplotlib>=3.4.0
 # tqdm 진행률 표시 라이브러리
 tqdm>=4.62.0
 # Transformers 자연어 처리 라이브러리 (BERT 등)
-transformers>=4.20.0
+transformers>=4.40.0
 # Librosa 오디오 처리 라이브러리
 librosa>=0.9.0
 # Scikit-learn 머신러닝 라이브러리
@@ -32,3 +32,4 @@ audiomentations>=0.42.0
 torchaudio==2.8.0
 # 오디오 처리 라이브러리
 torchcodec
+torchvision>=0.16.0

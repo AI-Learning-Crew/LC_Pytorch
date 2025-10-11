@@ -1,6 +1,6 @@
 # =============================================
 # File: evaluate_face_voice_contrast_hf.py
-# Description: Evaluate ViT+Wav2Vec2 dual-encoder (InfoNCE) on 118 IDs × 5 items
+# Description: Evaluate TimeSformer+Wav2Vec2 dual-encoder (InfoNCE) on 118 IDs × 5 items
 # Metrics: Recall@1 / @5 / @10 for image→audio and audio→image; macro average
 # =============================================
 from __future__ import annotations
@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from transformers import (
-    ViTModel, ViTImageProcessor,
+    TimesformerModel, AutoImageProcessor,
     Wav2Vec2Model, Wav2Vec2Processor,
 )
 
@@ -44,52 +44,93 @@ class ProjectionHead(torch.nn.Module):
 
 class FaceVoiceDualEncoder(torch.nn.Module):
     def __init__(self,
-                 vit_name: str = "google/vit-base-patch16-224-in21k",
+                 vit_name: str = "facebook/timesformer-base-finetuned-k400",
                  w2v_name: str = "facebook/wav2vec2-base",
                  embed_dim: int = 256,
                  freeze_backbones: bool = False,
                  average_frame_embeddings: bool = True):
         super().__init__()
-        self.vit = ViTModel.from_pretrained(vit_name)
+        self.video_encoder = TimesformerModel.from_pretrained(vit_name)
         self.w2v = Wav2Vec2Model.from_pretrained(w2v_name)
         self.average_frame_embeddings = average_frame_embeddings
         self.freeze_backbones = freeze_backbones
 
-        vit_out = self.vit.config.hidden_size
+        vit_out = self.video_encoder.config.hidden_size
         w2v_out = self.w2v.config.hidden_size
 
         self.img_proj = ProjectionHead(vit_out, embed_dim, hidden_dim=vit_out)
         self.aud_proj = ProjectionHead(w2v_out, embed_dim, hidden_dim=w2v_out)
 
+        self.required_frames = getattr(self.video_encoder.config, "num_frames", None)
+
         if freeze_backbones:
-            for p in self.vit.parameters():
+            for p in self.video_encoder.parameters():
                 p.requires_grad = False
             for p in self.w2v.parameters():
                 p.requires_grad = False
 
-    @torch.no_grad()
-    def _vit_encode_frames(self, frames_tensor: torch.Tensor) -> torch.Tensor:
-        out = self.vit(pixel_values=frames_tensor, output_hidden_states=False)
-        return out.last_hidden_state[:, 0, :]
+    def _prepare_clip(self, clip: torch.Tensor) -> torch.Tensor:
+        if clip.ndim != 4:
+            raise ValueError(f"Expected clip tensor (frames,3,H,W); got {clip.shape}")
+
+        if self.required_frames is None:
+            return clip
+
+        current = clip.size(0)
+        target = self.required_frames
+        if current == target:
+            return clip
+        if current > target:
+            idxs = torch.linspace(0, current - 1, steps=target, device=clip.device)
+            idxs = idxs.round().long()
+            return clip.index_select(0, idxs)
+        pad_count = target - current
+        pad = clip[-1:].expand(pad_count, -1, -1, -1)
+        return torch.cat([clip, pad], dim=0)
+
+    def _video_encode_clip(self, clip: torch.Tensor) -> torch.Tensor:
+        clip = self._prepare_clip(clip)
+        clip = clip.unsqueeze(0)  # (1,T,3,H,W)
+        ctx = torch.no_grad() if self.freeze_backbones else torch.enable_grad()
+        with ctx:
+            out = self.video_encoder(pixel_values=clip, output_hidden_states=False)
+            cls = out.last_hidden_state[:, 0, :]
+        return cls
 
     @torch.no_grad()
     def encode_images(self, images) -> torch.Tensor:
         device = next(self.parameters()).device
         if isinstance(images, list):
             feats = []
-            for frames in images:
-                frames = frames.to(device)
-                f = self._vit_encode_frames(frames)  # (K,D)
-                f = f.mean(dim=0, keepdim=True)
-                feats.append(f)
+            for clip in images:
+                clip = clip.to(device)
+                if clip.ndim == 3:
+                    clip = clip.unsqueeze(0)
+                if clip.ndim != 4:
+                    raise ValueError(f"Unexpected frame tensor shape: {clip.shape}")
+                feats.append(self._video_encode_clip(clip))
             img_feats = torch.cat(feats, dim=0)
         elif images.ndim == 4:  # (B,3,H,W)
-            img_feats = self._vit_encode_frames(images.to(device))
+            clips = images.to(device)
+            feats = []
+            for img in clips:
+                clip = img.unsqueeze(0)
+                feats.append(self._video_encode_clip(clip))
+            img_feats = torch.cat(feats, dim=0)
         elif images.ndim == 5:  # (B,K,3,H,W)
             B, K = images.shape[:2]
-            flat = images.view(B*K, *images.shape[2:]).to(device)
-            cls = self._vit_encode_frames(flat).view(B, K, -1)
-            img_feats = cls.mean(dim=1)
+            clips = images.to(device)
+            feats = []
+            for b in range(B):
+                clip = clips[b]
+                flat = clip.view(K, -1)
+                valid = flat.abs().sum(dim=1) > 0
+                if valid.any():
+                    clip = clip[valid]
+                else:
+                    clip = clip[:1]
+                feats.append(self._video_encode_clip(clip))
+            img_feats = torch.cat(feats, dim=0)
         else:
             raise ValueError(f"Unexpected images shape: {getattr(images, 'shape', None)}")
         return self.img_proj(img_feats)
@@ -102,7 +143,7 @@ class FaceVoiceDualEncoder(torch.nn.Module):
             attention_mask = (audio != 0.0).to(audio.dtype)
         attention_mask = attention_mask.to(device)
         out = self.w2v(input_values=audio, attention_mask=attention_mask, output_hidden_states=False)
-        hidden = out.last_hidden_state  # (B, T', D)
+        hidden = out.last_hidden_state
         aud_feat = hidden.mean(dim=1)
         return self.aud_proj(aud_feat)
 
@@ -207,7 +248,7 @@ class EvalConfig:
     vit_name: Optional[str] = None
     w2v_name: Optional[str] = None
     batch_size: int = 32
-    frames_per_sample: int = 4
+    frames_per_sample: int = 8
     frame_sample_mode: str = "uniform"
     audio_seconds: float = 2.0
     num_workers: int = 4
@@ -217,7 +258,7 @@ class EvalConfig:
 
 def load_model_from_heads(ckpt_path: str, vit_name: Optional[str], w2v_name: Optional[str]) -> FaceVoiceDualEncoder:
     ckpt = torch.load(ckpt_path, map_location="cpu")
-    vit_name = vit_name or ckpt.get("vit_name", "google/vit-base-patch16-224-in21k")
+    vit_name = vit_name or ckpt.get("vit_name", "facebook/timesformer-base-finetuned-k400")
     w2v_name = w2v_name or ckpt.get("w2v_name", "facebook/wav2vec2-base")
 
     model = FaceVoiceDualEncoder(vit_name=vit_name, w2v_name=w2v_name, embed_dim=256, freeze_backbones=True)
@@ -234,7 +275,7 @@ def main(cfg: EvalConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # processors
-    image_processor = ViTImageProcessor.from_pretrained(cfg.vit_name or "google/vit-base-patch16-224-in21k")
+    image_processor = AutoImageProcessor.from_pretrained(cfg.vit_name or "facebook/timesformer-base-finetuned-k400")
     w2v_proc = Wav2Vec2Processor.from_pretrained(cfg.w2v_name or "facebook/wav2vec2-base")
 
     # dataset (NO shuffle)
@@ -246,9 +287,8 @@ def main(cfg: EvalConfig):
         audio_processor=w2v_proc,
         audio_seconds=cfg.audio_seconds,
         target_sr=w2v_proc.feature_extractor.sampling_rate,
-        average_frames=True,
     )
-    collate_fn = make_collate_fn(image_processor, average_frames=True)
+    collate_fn = make_collate_fn(image_processor)
     dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers,
                     collate_fn=collate_fn, drop_last=False, pin_memory=True)
 
@@ -307,7 +347,7 @@ if __name__ == "__main__":
     parser.add_argument('--vit_name', type=str, default=os.environ.get("VIT", ""))
     parser.add_argument('--w2v_name', type=str, default=os.environ.get("W2V", ""))
     parser.add_argument('--batch_size', type=int, default=int(os.environ.get("BATCH", 32)))
-    parser.add_argument('--frames_per_sample', type=int, default=int(os.environ.get("K", 4)))
+    parser.add_argument('--frames_per_sample', type=int, default=int(os.environ.get("K", 8)))
     parser.add_argument('--audio_seconds', type=float, default=float(os.environ.get("ASEC", 2.0)))
     parser.add_argument('--num_workers', type=int, default=int(os.environ.get("WORKERS", 4)))
     parser.add_argument('--average_by_id', type=lambda x: bool(int(x)), default=bool(int(os.environ.get("AVG_ID", 0))))

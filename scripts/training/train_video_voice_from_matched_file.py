@@ -1,6 +1,6 @@
 # =============================================
 # File: train_face_voice_contrast_hf.py
-# Description: ViT + Wav2Vec2 dual encoder contrastive training (InfoNCE)
+# Description: TimeSformer (video ViT) + Wav2Vec2 dual encoder contrastive training (InfoNCE)
 # =============================================
 from __future__ import annotations
 import math, os
@@ -19,7 +19,7 @@ from pathlib import Path
 import torch.nn.functional as F
 
 from transformers import (
-    ViTModel, ViTImageProcessor,
+    TimesformerModel, AutoImageProcessor,
     Wav2Vec2Model, Wav2Vec2Processor,
     get_cosine_schedule_with_warmup,
 )
@@ -58,38 +58,65 @@ class ProjectionHead(nn.Module):
 
 class FaceVoiceDualEncoder(nn.Module):
     def __init__(self,
-                 vit_name: str = "google/vit-base-patch16-224-in21k",
+                 vit_name: str = "facebook/timesformer-base-finetuned-k400",
                  w2v_name: str = "facebook/wav2vec2-base",
                  embed_dim: int = 256,
                  freeze_backbones: bool = False,
                  average_frame_embeddings: bool = True):
         super().__init__()
-        self.vit = ViTModel.from_pretrained(vit_name)
+        self.video_encoder = TimesformerModel.from_pretrained(vit_name)
         self.w2v = Wav2Vec2Model.from_pretrained(w2v_name)
         self.average_frame_embeddings = average_frame_embeddings
         self.freeze_backbones = freeze_backbones
 
-        vit_out = self.vit.config.hidden_size
+        vit_out = self.video_encoder.config.hidden_size
         w2v_out = self.w2v.config.hidden_size
 
         self.img_proj = ProjectionHead(vit_out, embed_dim, hidden_dim=vit_out)
         self.aud_proj = ProjectionHead(w2v_out, embed_dim, hidden_dim=w2v_out)
 
+        self.required_frames = getattr(self.video_encoder.config, "num_frames", None)
+
         if freeze_backbones:
-            for p in self.vit.parameters():
+            for p in self.video_encoder.parameters():
                 p.requires_grad = False
             for p in self.w2v.parameters():
                 p.requires_grad = False
 
-    def _vit_encode_frames(self, frames_tensor: torch.Tensor) -> torch.Tensor:
+    def _prepare_clip(self, clip: torch.Tensor) -> torch.Tensor:
         """
-        frames_tensor: (K,3,H,W) or (B,3,H,W)
-        returns: (K,D) or (B,D) using CLS
+        Normalize clip length to match the video encoder requirement.
+        clip: (T, 3, H, W)
         """
+        if clip.ndim != 4:
+            raise ValueError(f"Expected clip tensor (frames,3,H,W); got {clip.shape}")
+
+        if self.required_frames is None:
+            return clip
+
+        current = clip.size(0)
+        target = self.required_frames
+        if current == target:
+            return clip
+        if current > target:
+            idxs = torch.linspace(0, current - 1, steps=target, device=clip.device)
+            idxs = idxs.round().long()
+            return clip.index_select(0, idxs)
+        # current < target: pad by repeating last frame
+        pad_count = target - current
+        pad = clip[-1:].expand(pad_count, -1, -1, -1)
+        return torch.cat([clip, pad], dim=0)
+
+    def _video_encode_clip(self, clip: torch.Tensor) -> torch.Tensor:
+        """
+        clip: (T,3,H,W) -> returns (1,D) CLS embedding
+        """
+        clip = self._prepare_clip(clip)
+        clip = clip.unsqueeze(0)  # (1,T,3,H,W)
         ctx = torch.no_grad() if self.freeze_backbones else torch.enable_grad()
         with ctx:
-            out = self.vit(pixel_values=frames_tensor, output_hidden_states=False)
-            cls = out.last_hidden_state[:, 0, :]
+            out = self.video_encoder(pixel_values=clip, output_hidden_states=False)
+            cls = out.last_hidden_state[:, 0, :]  # (1,D)
         return cls
 
     def encode_images(self, images) -> torch.Tensor:
@@ -103,28 +130,41 @@ class FaceVoiceDualEncoder(nn.Module):
         device = next(self.parameters()).device
 
         if isinstance(images, list):
-            # legacy path: list of (K,3,H,W)
             feats = []
-            for frames in images:
-                frames = frames.to(device)
-                f = self._vit_encode_frames(frames)  # (K,D)
-                if self.average_frame_embeddings or frames.ndim == 3:
-                    f = f.mean(dim=0, keepdim=True)   # (1,D)
-                else:
-                    f = f.mean(dim=0, keepdim=True)
-                feats.append(f)
-            img_feats = torch.cat(feats, dim=0)       # (B,D)
+            for clip in images:
+                clip = clip.to(device)
+                if clip.ndim == 3:
+                    clip = clip.unsqueeze(0)  # (1,3,H,W)
+                if clip.ndim != 4:
+                    raise ValueError(f"Unexpected frame tensor shape: {clip.shape}")
+                feat = self._video_encode_clip(clip)
+                feats.append(feat)
+            img_feats = torch.cat(feats, dim=0)
 
         elif images.ndim == 4:  # (B,3,H,W)
-            B = images.size(0)
-            cls = self._vit_encode_frames(images.to(device))  # (B,D)
-            img_feats = cls
+            clips = images.to(device)
+            feats = []
+            for img in clips:
+                clip = img.unsqueeze(0)  # (1,3,H,W)
+                feat = self._video_encode_clip(clip)
+                feats.append(feat)
+            img_feats = torch.cat(feats, dim=0)
 
         elif images.ndim == 5:  # (B,K,3,H,W)
             B, K = images.shape[:2]
-            flat = images.view(B*K, *images.shape[2:]).to(device)  # (B*K,3,H,W)
-            cls = self._vit_encode_frames(flat).view(B, K, -1)     # (B,K,D)
-            img_feats = cls.mean(dim=1)                            # (B,D)
+            clips = images.to(device)
+            feats = []
+            for b in range(B):
+                clip = clips[b]
+                flat = clip.view(K, -1)
+                valid = flat.abs().sum(dim=1) > 0
+                if valid.any():
+                    clip = clip[valid]
+                else:
+                    clip = clip[:1]
+                feat = self._video_encode_clip(clip)
+                feats.append(feat)
+            img_feats = torch.cat(feats, dim=0)
         else:
             raise ValueError(f"Unexpected images shape: {getattr(images, 'shape', None)}")
 
@@ -179,10 +219,10 @@ def contrastive_loss(img_z: torch.Tensor, aud_z: torch.Tensor, tau: float = 0.07
 class TrainConfig:
     meta_path: str = "meta.json"
     root_dir: str = "dataset_root"
-    vit_name: str = "google/vit-base-patch16-224-in21k"
+    vit_name: str = "facebook/timesformer-base-finetuned-k400"
     w2v_name: str = "facebook/wav2vec2-base"
     batch_size: int = 16
-    frames_per_sample: int = 4
+    frames_per_sample: int = 8
     frame_sample_mode: str = "uniform"
     audio_seconds: float = 2.0
     lr: float = 3e-5
@@ -202,7 +242,7 @@ def main(cfg: TrainConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # processors
-    image_processor = ViTImageProcessor.from_pretrained(cfg.vit_name)
+    image_processor = AutoImageProcessor.from_pretrained(cfg.vit_name)
     wav2vec2_processor = Wav2Vec2Processor.from_pretrained(cfg.w2v_name)
 
     # dataset & loader
@@ -216,9 +256,8 @@ def main(cfg: TrainConfig):
         audio_processor=wav2vec2_processor,
         audio_seconds=cfg.audio_seconds,
         target_sr=wav2vec2_processor.feature_extractor.sampling_rate,
-        average_frames=True,
     )
-    collate_fn = make_collate_fn(image_processor, average_frames=True)
+    collate_fn = make_collate_fn(image_processor)
     dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers,
                     collate_fn=collate_fn, drop_last=True, pin_memory=True)
 
@@ -333,8 +372,8 @@ if __name__ == "__main__":
                         help='모델 저장 경로 (기본값: checkpoints)')
     parser.add_argument('--batch_size', type=int, default=int(os.environ.get("BATCH", 16)),
                         help='배치 크기 (기본값: 16)')
-    parser.add_argument('--frames_per_sample', type=int, default=int(os.environ.get("K", 4)),
-                        help='샘플당 프레임 수 (기본값: 4)')
+    parser.add_argument('--frames_per_sample', type=int, default=int(os.environ.get("K", 8)),
+                        help='샘플당 프레임 수 (기본값: 8)')
     parser.add_argument('--max_epochs', type=int, default=int(os.environ.get("EPOCHS", 5)),
                         help='최대 에포크 수 (기본값: 5)')
     parser.add_argument('--freeze_backbones', type=lambda x: bool(int(x)), default=bool(int(os.environ.get("FREEZE", 0))),

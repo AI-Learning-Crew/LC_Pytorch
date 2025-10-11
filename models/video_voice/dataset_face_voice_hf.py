@@ -70,7 +70,6 @@ class FaceVoiceDatasetHF(Dataset):
         audio_processor: Wav2Vec2Processor | None = None,
         audio_seconds: float = 2.0,
         target_sr: int = 16000,
-        average_frames: bool = True,
     ) -> None:
         self.root = Path(root_dir)
         self.meta = json.loads(Path(meta_path).read_text(encoding="utf-8"))
@@ -81,7 +80,6 @@ class FaceVoiceDatasetHF(Dataset):
         self.audio_seconds = float(audio_seconds)
         self.target_sr = int(target_sr)
         self.num_audio_samples = int(self.target_sr * self.audio_seconds)
-        self.average_frames = average_frames
 
         # 프로세서: 전달받지 않으면 여기서 한 번만 생성
         self.audio_processor = audio_processor or Wav2Vec2Processor.from_pretrained(
@@ -134,46 +132,65 @@ class FaceVoiceDatasetHF(Dataset):
         }
 
 # ---- Collate with HF processors -------------------------------------------
-    
-def make_collate_fn(image_processor, average_frames: bool = True):
+
+def make_collate_fn(image_processor):
     def collate(batch):
         # ----- images -----
-        all_frames = []
+        clips = []
         frame_counts = []
         for b in batch:
             frames = b["images"]
-            frame_counts.append(len(frames))
-            all_frames.extend(frames)
+            if len(frames) == 0:
+                clips.append(torch.empty(0))
+                frame_counts.append(0)
+                continue
 
-        if sum(frame_counts) == 0:
+            processed = image_processor(images=frames, return_tensors="pt")
+            pixel_values = processed["pixel_values"]
+            # 일부 프로세서는 (1, T, 3, H, W) 형태로 반환
+            # 1: 현재 텐서에 포함된 비디오 클립 수 (batch dimension).
+            # T: 비디오의 프레임 개수(시간축).
+            # 3: 채널 수(RGB).
+            # H, W: 각 프레임의 높이·너비(이미지 공간 해상도).
+            if pixel_values.ndim == 5 and pixel_values.shape[0] == 1:
+                pixel_values = pixel_values.squeeze(0)  # (T,3,H,W)
+            if pixel_values.ndim == 3:
+                pixel_values = pixel_values.unsqueeze(0)  # (1,3,H,W)
+            clips.append(pixel_values)
+            frame_counts.append(pixel_values.shape[0])
+
+        if all(fc == 0 for fc in frame_counts):
             raise RuntimeError("All items have zero frames in this batch.")
 
-        px = image_processor(images=all_frames, return_tensors="pt")
-        pixel_values = px["pixel_values"]                 # (sumK, 3, H, W)
-        chunks = torch.split(pixel_values, frame_counts)  # list[(Ki,3,H,W)]
+        ref_shape = None
+        ref_dtype = None
+        ref_device = None
+        for clip in clips:
+            if clip.ndim >= 3:
+                ref_shape = clip.shape[1:]
+                ref_dtype = clip.dtype
+                ref_device = clip.device
+                break
 
-        if average_frames:
-            # Ki가 0인 경우를 방어 (이상치 스킵 또는 제로패드)
-            pooled = []
-            for c in chunks:
-                if c.shape[0] == 0:
-                    # 제로로 대체 (드문 케이스)
-                    pooled.append(torch.zeros((1, *c.shape[1:]), dtype=c.dtype, device=c.device))
+        if ref_shape is None:
+            raise RuntimeError("No clips with valid frames found in batch.")
+
+        max_k = max(frame_counts)
+        if max_k == 0:
+            raise RuntimeError("No frames to pad in non-averaging path.")
+        padded_list = []
+        for clip in clips:
+            if clip.ndim <= 1 or clip.shape[0] == 0:
+                padded = torch.zeros((max_k, *ref_shape), dtype=ref_dtype, device=ref_device)
+            else:
+                if clip.shape[0] < max_k:
+                    pad = torch.zeros((max_k - clip.shape[0], *clip.shape[1:]),
+                                      dtype=clip.dtype, device=clip.device)
+                    padded = torch.cat([clip, pad], dim=0)
                 else:
-                    pooled.append(c.mean(dim=0, keepdim=True))
-            videos = torch.cat(pooled, dim=0)  # (B,3,H,W)
-        else:
-            max_k = max((c.shape[0] for c in chunks), default=0)
-            if max_k == 0:
-                raise RuntimeError("No frames to pad in non-averaging path.")
-            padded_list = []
-            for c in chunks:
-                if c.shape[0] < max_k:
-                    pad = torch.zeros((max_k - c.shape[0], *c.shape[1:]),
-                                      dtype=c.dtype, device=c.device)
-                    c = torch.cat([c, pad], dim=0)
-                padded_list.append(c)
-            videos = torch.stack(padded_list, dim=0)  # (B,K,3,H,W)
+                    padded = clip[:max_k]
+            padded_list.append(padded)
+        videos = torch.stack(padded_list, dim=0)  # (B,K,3,H,W)
 
         # ----- audios -----
         audios = [b["audio"] for b in batch]  # list[(T_i,)]

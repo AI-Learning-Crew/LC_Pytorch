@@ -5,10 +5,8 @@
 from __future__ import annotations
 import math, os
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import argparse
@@ -19,8 +17,8 @@ from pathlib import Path
 import torch.nn.functional as F
 
 from transformers import (
-    TimesformerModel, AutoImageProcessor,
-    Wav2Vec2Model, Wav2Vec2Processor,
+    AutoImageProcessor,
+    Wav2Vec2Processor,
     get_cosine_schedule_with_warmup,
 )
 
@@ -31,172 +29,11 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from models.video_voice.dataset_face_voice_hf import FaceVoiceDatasetHF, make_collate_fn
+from models.video_voice.face_voice_dual_encoder import FaceVoiceDualEncoder
 
 # If running as a single file, the definitions above would be in the same module.
 # Otherwise, import as:
 # from dataset_face_voice_hf import FaceVoiceDatasetHF, make_collate_fn
-
-# ---- Projection heads ------------------------------------------------------
-
-class ProjectionHead(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int = 256, hidden_dim: Optional[int] = None, dropout: float = 0.0):
-        super().__init__()
-        if hidden_dim:
-            self.net = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim), nn.GELU(), nn.Dropout(dropout),
-                nn.Linear(hidden_dim, out_dim)
-            )
-        else:
-            self.net = nn.Linear(in_dim, out_dim)
-
-    def forward(self, x):
-        x = self.net(x)
-        x = nn.functional.normalize(x, dim=-1)
-        return x
-
-# ---- Dual encoder wrapper --------------------------------------------------
-
-class FaceVoiceDualEncoder(nn.Module):
-    def __init__(self,
-                 vit_name: str = "facebook/timesformer-base-finetuned-k400",
-                 w2v_name: str = "facebook/wav2vec2-base",
-                 embed_dim: int = 256,
-                 freeze_backbones: bool = False,
-                 average_frame_embeddings: bool = True):
-        super().__init__()
-        self.video_encoder = TimesformerModel.from_pretrained(vit_name)
-        self.w2v = Wav2Vec2Model.from_pretrained(w2v_name)
-        self.average_frame_embeddings = average_frame_embeddings
-        self.freeze_backbones = freeze_backbones
-
-        vit_out = self.video_encoder.config.hidden_size
-        w2v_out = self.w2v.config.hidden_size
-
-        self.img_proj = ProjectionHead(vit_out, embed_dim, hidden_dim=vit_out)
-        self.aud_proj = ProjectionHead(w2v_out, embed_dim, hidden_dim=w2v_out)
-
-        self.required_frames = getattr(self.video_encoder.config, "num_frames", None)
-
-        if freeze_backbones:
-            for p in self.video_encoder.parameters():
-                p.requires_grad = False
-            for p in self.w2v.parameters():
-                p.requires_grad = False
-
-    def _prepare_clip(self, clip: torch.Tensor) -> torch.Tensor:
-        """
-        Normalize clip length to match the video encoder requirement.
-        clip: (T, 3, H, W)
-        """
-        if clip.ndim != 4:
-            raise ValueError(f"Expected clip tensor (frames,3,H,W); got {clip.shape}")
-
-        if self.required_frames is None:
-            return clip
-
-        current = clip.size(0)
-        target = self.required_frames
-        if current == target:
-            return clip
-        if current > target:
-            idxs = torch.linspace(0, current - 1, steps=target, device=clip.device)
-            idxs = idxs.round().long()
-            return clip.index_select(0, idxs)
-        # current < target: pad by repeating last frame
-        pad_count = target - current
-        pad = clip[-1:].expand(pad_count, -1, -1, -1)
-        return torch.cat([clip, pad], dim=0)
-
-    def _video_encode_clip(self, clip: torch.Tensor) -> torch.Tensor:
-        """
-        clip: (T,3,H,W) -> returns (1,D) CLS embedding
-        """
-        clip = self._prepare_clip(clip)
-        clip = clip.unsqueeze(0)  # (1,T,3,H,W)
-        ctx = torch.no_grad() if self.freeze_backbones else torch.enable_grad()
-        with ctx:
-            out = self.video_encoder(pixel_values=clip, output_hidden_states=False)
-            cls = out.last_hidden_state[:, 0, :]  # (1,D)
-        return cls
-
-    def encode_images(self, images) -> torch.Tensor:
-        """
-        images:
-          - (B,3,H,W)        if averaged in collate, or
-          - (B,K,3,H,W)      if not averaged, or
-          - list[(K,3,H,W)]  legacy
-        returns: (B, d) L2-normalized
-        """
-        device = next(self.parameters()).device
-
-        if isinstance(images, list):
-            feats = []
-            for clip in images:
-                clip = clip.to(device)
-                if clip.ndim == 3:
-                    clip = clip.unsqueeze(0)  # (1,3,H,W)
-                if clip.ndim != 4:
-                    raise ValueError(f"Unexpected frame tensor shape: {clip.shape}")
-                feat = self._video_encode_clip(clip)
-                feats.append(feat)
-            img_feats = torch.cat(feats, dim=0)
-
-        elif images.ndim == 4:  # (B,3,H,W)
-            clips = images.to(device)
-            feats = []
-            for img in clips:
-                clip = img.unsqueeze(0)  # (1,3,H,W)
-                feat = self._video_encode_clip(clip)
-                feats.append(feat)
-            img_feats = torch.cat(feats, dim=0)
-
-        elif images.ndim == 5:  # (B,K,3,H,W)
-            B, K = images.shape[:2]
-            clips = images.to(device)
-            feats = []
-            for b in range(B):
-                clip = clips[b]
-                flat = clip.view(K, -1)
-                valid = flat.abs().sum(dim=1) > 0
-                if valid.any():
-                    clip = clip[valid]
-                else:
-                    clip = clip[:1]
-                feat = self._video_encode_clip(clip)
-                feats.append(feat)
-            img_feats = torch.cat(feats, dim=0)
-        else:
-            raise ValueError(f"Unexpected images shape: {getattr(images, 'shape', None)}")
-
-        img_z = self.img_proj(img_feats)               # (B,d)
-        return F.normalize(img_z, p=2, dim=1)
-
-    def encode_audios(self, audio: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        audio: (B, T) padded with zeros
-        attention_mask: (B, T) with 1 for real, 0 for pad. If None, infer from audio!=0.
-        returns: (B, d) L2-normalized
-        """
-        device = next(self.parameters()).device
-        audio = audio.to(device)
-
-        if attention_mask is None:
-            attention_mask = (audio != 0.0).to(audio.dtype)
-        attention_mask = attention_mask.to(device)
-
-        ctx = torch.no_grad() if self.freeze_backbones else torch.enable_grad()
-        with ctx:
-            out = self.w2v(input_values=audio, attention_mask=attention_mask, output_hidden_states=False)
-            # 마스킹 평균
-            hidden = out.last_hidden_state  # (B, T', D); W2V는 stride로 T' < T일 수 있음
-            # Wav2Vec2는 내부 다운샘플로 attention_mask도 다운샘플 안 됨.
-            # 간단 대안: hidden의 시간축 mean (실무에선 CTC mask/특징 길이로 정교화 권장)
-            aud_feat = hidden.mean(dim=1)   # (B, D)
-
-        aud_z = self.aud_proj(aud_feat)     # (B, d)
-        return F.normalize(aud_z, p=2, dim=1)
-
-
 
 # ---- Loss ------------------------------------------------------------------
 
@@ -267,7 +104,6 @@ def main(cfg: TrainConfig):
         w2v_name=cfg.w2v_name,
         embed_dim=cfg.embed_dim,
         freeze_backbones=cfg.freeze_backbones,
-        average_frame_embeddings=True,
     ).to(device)
 
     # optimizer & scheduler

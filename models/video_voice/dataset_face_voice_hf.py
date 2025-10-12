@@ -100,13 +100,27 @@ class FaceVoiceDatasetHF(Dataset):
 
     def _load_image(self, rel_path: str) -> Image.Image:
         p = self.root / rel_path
-        img = Image.open(p).convert("RGB")
-        return img
+        try:
+            return Image.open(p).convert("RGB")
+        except (FileNotFoundError, OSError) as exc:
+            print(f"[FaceVoiceDatasetHF] Failed to load image {p}: {exc}")
+            return None
 
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def _get_item(self, idx: int, depth: int = 0) -> Dict[str, Any]:
+        if depth >= len(self.records):
+            raise RuntimeError("Exceeded max retries while attempting to fetch a valid sample.")
+
         r = self.records[idx]
         chosen = self._sample_frames(r["faces"])
-        images = [self._load_image(fp) for fp in chosen]
+        images = []
+        for fp in chosen:
+            img = self._load_image(fp)
+            if img is not None:
+                images.append(img)
+
+        if not images:
+            print(f"[FaceVoiceDatasetHF] No valid frames for pid={r['id']} session={r['session']}. Retrying with next sample.")
+            return self._get_item((idx + 1) % len(self.records), depth + 1)
 
         audio_path = self.root / r["voice"]
         # librosa가 float32 mono로 반환, sr로 리샘플링 완료
@@ -123,13 +137,15 @@ class FaceVoiceDatasetHF(Dataset):
             speech_array, sampling_rate=self.target_sr, return_tensors="pt"
         ).input_values.squeeze(0)  # (T,)
 
-        print(f"Loaded sample {r["id"]}: {len(images)} images, audio shape {audio_input.shape}")
         return {
             "images": images,        # list[PIL.Image] (K)
             "audio": audio_input,    # (T,)
             "pid": r["id"],
             "session": r["session"],
         }
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self._get_item(idx)
 
 # ---- Collate with HF processors -------------------------------------------
 

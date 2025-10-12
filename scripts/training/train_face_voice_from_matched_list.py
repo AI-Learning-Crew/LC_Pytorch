@@ -20,7 +20,6 @@ sys.path.insert(0, str(project_root))
 
 import torch
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 from tqdm.auto import tqdm
 
@@ -127,7 +126,7 @@ def save_best_model_weights(model, filepath):
         print(f"❌ 최고 성능 모델 저장 중 오류 발생: {e}")
 
 def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
-                scheduler, device, num_epochs, save_dir, tensorboard_dir,
+                scheduler, device, num_epochs, save_dir,
                 start_epoch, best_val_loss, checkpoint_manager):
     """
     모델 학습
@@ -141,7 +140,6 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
         device: 계산 장치
         num_epochs: 학습 에포크 수
         save_dir: 모델 저장 디렉토리
-        tensorboard_dir: TensorBoard 로그를 저장할 경로. None일 경우 로깅하지 않음
         start_epoch: 학습을 시작할 에포크 번호. 학습 재개 시 사용
         best_val_loss: 이전 학습에서 기록된 가장 낮은 검증 손실 값. 학습 재개 시 사용
 
@@ -150,11 +148,6 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
     """
     history = {'train_loss': [], 'val_loss': []}
 
-    # TensorBoard 설정
-    writer = SummaryWriter(tensorboard_dir) if tensorboard_dir else None 
-    if writer:
-        print(f"TensorBoard 로그가 '{tensorboard_dir}'에 저장됩니다.")
-        print(f"실행: tensorboard --logdir={os.path.dirname(tensorboard_dir)}")
 
     # 학습 재개를 위해 global_step 초기화
     global_step = start_epoch * len(train_dataloader)
@@ -179,10 +172,6 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
 
             train_loss += loss.item()
             train_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-
-            # TensorBoard에 배치별 손실 기록
-            if writer:
-                writer.add_scalar('Loss/Train_Batch', loss.item(), global_step)
 
             global_step += 1
 
@@ -229,29 +218,6 @@ def train_model(model, train_dataloader, val_dataloader, criterion, optimizer,
         # 재개에 필요한 모든 정보를 포함하는 체크포인트를 저장
         checkpoint_manager.save(epoch, model, optimizer, scheduler, best_val_loss)
 
-        # TensorBoard에 에포크별 메트릭 기록
-        if writer:
-            # 훈련 및 검증 손실 기록
-            writer.add_scalar('Loss/Train_Epoch', train_loss, epoch)
-            writer.add_scalar('Loss/Val_Epoch', val_loss, epoch)
-
-            # 그룹별 학습률을 구분하여 기록
-            writer.add_scalar('Learning_Rate/Pretrained', lrs[0], epoch)
-            writer.add_scalar('Learning_Rate/Projection', lrs[1], epoch)
-
-            # 모델 파라미터 및 그래디언트 분포 히스토그램 (매 10 에포크마다)
-            if (epoch + 1) % 10 == 0:
-                for name, param in model.named_parameters():
-                    if param.requires_grad:
-                        writer.add_histogram(f'Parameters/{name}', param.data, epoch)
-                        if param.grad is not None:
-                            writer.add_histogram(f'Gradients/{name}', param.grad, epoch)
-
-    # TensorBoard 종료
-    if writer:
-        writer.close()
-        print(f"TensorBoard 로그가 '{tensorboard_dir}'에 저장되었습니다.")
-
     return history
 
 
@@ -259,12 +225,8 @@ def main():
     parser = argparse.ArgumentParser(description='얼굴-음성 매칭 모델을 학습합니다.')
 
     # 데이터 경로
-    parser.add_argument('--train_matched_file', type=str, required=True,
-                        help='학습용 매칭된 파일 경로 (예: matched_file.txt)')
-    
-    parser.add_argument('--val_matched_file', type=str, required=True,
-                        help='검증용 매칭된 파일 경로 (예: matched_file.txt)')
-
+    parser.add_argument('--matched_pair', type=str, default=None,
+                       help='이미 매칭된 파일 목록이 저장된 경로 (JSON 파일)')
     parser.add_argument('--save_dir', type=str, required=True,
                        help='모델 저장 디렉토리')
 
@@ -281,6 +243,7 @@ def main():
                        help='학습 에포크 수 (기본값: 100)')
     parser.add_argument('--learning_rate', type=float, default=1e-3,
                         help='(신규 레이어용) 기본 학습률 (기본값: 1e-3)')
+    
     # 사전 학습된 모델을 위한 학습률 인자
     parser.add_argument('--pretrained_lr', type=float, default=1e-5,
                         help='사전 학습된 레이어의 학습률 (기본값: 1e-5)')
@@ -288,11 +251,6 @@ def main():
                        help='테스트 데이터 비율 (기본값: 0.2)')
     parser.add_argument('--random_state', type=int, default=42,
                        help='랜덤 시드 (기본값: 42)')
-    parser.add_argument('--disable_image_augmentation', action='store_true',
-                        help='이미지 데이터 증강을 비활성화합니다.')
-    parser.add_argument('--disable_audio_augmentation', action='store_true',
-                        help='오디오 데이터 증강을 비활성화합니다.')
-
 
     # 오디오 설정
     parser.add_argument('--audio_duration_sec', type=int, default=5,
@@ -300,18 +258,6 @@ def main():
     parser.add_argument('--target_sr', type=int, default=16000,
                        help='오디오 샘플링 레이트 (기본값: 16000)')
 
-    # 파일 매칭 설정
-    parser.add_argument('--skip_file_matching', action='store_true',
-                       help='파일 매칭 과정을 건너뜁니다 (이미 매칭된 파일 목록이 있는 경우)')
-    parser.add_argument('--matched_files_path', type=str, default=None,
-                       help='이미 매칭된 파일 목록이 저장된 경로 (JSON 파일)')
-
-    # TensorBoard 설정
-    parser.add_argument('--tensorboard_dir', type=str, default=None,
-                       help='TensorBoard 로그 디렉토리 (기본값: save_dir/runs)')
-    parser.add_argument('--no_tensorboard', action='store_true',
-                       help='TensorBoard 로깅을 비활성화합니다')
-    
     # 학습 재개 설정
     parser.add_argument('--resume_dir', type=str, default=None,
                         help='재개할 학습의 타임스탬프 디렉토리 경로 (예: saved_models/20250819_122430)')
@@ -344,83 +290,9 @@ def main():
             json.dump(vars(args), f, ensure_ascii=False, indent=4)
             print(f"학습 설정이 '{os.path.join(final_save_dir, 'config.json')}'에 저장되었습니다.")
 
-    # TensorBoard 디렉토리 설정
-    tensorboard_dir = None if args.no_tensorboard else os.path.join(final_save_dir, 'runs')
 
     # --- 데이터 준비 ---
-    train_files, val_files = [], []
-
-    # 파일 매칭 (선택적)
-    if args.skip_file_matching:
-        # 파일 매칭
-        if not os.path.exists(args.train_matched_file) or not os.path.exists(args.val_matched_file):
-            print(f"❌ 오류: 학습 또는 검증용 매칭된 파일 경로가 존재하지 않습니다.")
-            return 1
-        
-        print("매칭된 파일 로드 중...")
-        with open(args.train_matched_file, 'r') as f:
-            for line in f:
-                image_path, audio_path = line.strip().split()
-                # 두 파일 모두 존재할 때만 리스트에 추가
-                train_files.append((image_path, audio_path))
-        print(f"총 {len(train_files)}개의 매칭된 파일 쌍을 찾았습니다.")
-        with open(args.val_matched_file, 'r') as f:
-            for line in f:
-                image_path, audio_path = line.strip().split()
-                # 두 파일 모두 존재할 때만 리스트에 추가
-                val_files.append((image_path, audio_path))
-        print(f"총 {len(val_files)}개의 매칭된 파일 쌍을 찾았습니다.")
-        
-        
-        if len(train_files) == 0:
-            print("오류: 매칭된 파일이 없습니다. (train)")
-            return 1
-        
-        if len(val_files) == 0:
-            print("오류: 매칭된 파일이 없습니다. (val)")
-            return 1
-    else:
-        # 디렉토리 확인
-        if not os.path.exists(args.image_folder):
-            print(f"❌ 오류: 이미지 폴더 '{args.image_folder}'가 존재하지 않습니다.")
-            return 1
-
-        if not os.path.exists(args.audio_folder):
-            print(f"❌ 오류: 오디오 폴더 '{args.audio_folder}'가 존재하지 않습니다.")
-            return 1
-        
-        print("파일 매칭 중...")
-        matched_files = match_face_voice_files(args.image_folder, args.audio_folder)
-        print(f"총 {len(matched_files)}개의 매칭된 파일 쌍을 찾았습니다.")
-
-        # 매칭 결과 저장 (선택적)
-        if args.matched_files_path:
-            os.makedirs(os.path.dirname(args.matched_files_path), exist_ok=True)
-            with open(args.matched_files_path, 'w', encoding='utf-8') as f:
-                json.dump(matched_files, f, ensure_ascii=False, indent=2)
-            print(f"파일 매칭 결과가 '{args.matched_files_path}'에 저장되었습니다.")
-
-        if len(matched_files) == 0:
-            print(f"❌ 오류: 매칭된 파일이 없습니다. 경로를 확인해주세요.")
-            return 1
-        
-        # 데이터 분할
-        train_files, val_files = train_test_split(
-            matched_files,
-            test_size=args.test_size,
-            random_state=args.random_state
-        )
-    print(f"학습 데이터: {len(train_files)}개, 검증 데이터: {len(val_files)}개")
     
-    # 데이터 변환기 및 증강 파이프라인 생성
-    image_transform, processor = create_data_transforms(
-        use_augmentation=not args.disable_image_augmentation
-    )
-    audio_augmentations = create_audio_augmentations(
-        sample_rate=args.target_sr,
-        use_augmentation=not args.disable_audio_augmentation
-    )
-
     # 데이터셋 생성
     train_dataset = FaceVoiceDataset(
         train_files, processor, image_transform,
@@ -488,13 +360,10 @@ def main():
         model, train_dataloader, val_dataloader,
         InfoNCELoss(args.temperature),
         optimizer, scheduler, device, args.num_epochs, 
-        final_save_dir, tensorboard_dir, start_epoch, best_val_loss, checkpoint_manager
+        final_save_dir, '', start_epoch, best_val_loss, checkpoint_manager
     )
 
     print(f"학습 완료! 모델이 '{final_save_dir}'에 저장되었습니다.")
-    if tensorboard_dir:
-        print(f"TensorBoard 로그 확인: tensorboard --logdir={os.path.dirname(tensorboard_dir)}")
-    return 0
 
 
 if __name__ == '__main__':

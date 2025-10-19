@@ -13,6 +13,7 @@ from typing import Dict, List, Tuple, Optional
 
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from transformers import (
@@ -144,7 +145,7 @@ class EvalConfig:
     average_by_id: bool = False  # if True, average the 5 items per ID before computing recall
 
 
-def _load_model_state_dict(model: FaceVoiceDualEncoder, state_dict: Dict[str, torch.Tensor]) -> None:
+def _load_model_state_dict(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> None:
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
         print(f"[load_model] Missing keys when loading state dict: {missing}")
@@ -160,13 +161,14 @@ def load_model_from_checkpoint(cfg: EvalConfig) -> FaceVoiceDualEncoder:
 
     vit_name = cfg.vit_name or train_cfg.get("vit_name") or ckpt.get("vit_name") or "facebook/timesformer-base-finetuned-k400"
     w2v_name = cfg.w2v_name or train_cfg.get("w2v_name") or ckpt.get("w2v_name") or "facebook/wav2vec2-base"
+    cfg.vit_name = vit_name
+    cfg.w2v_name = w2v_name
 
     model = FaceVoiceDualEncoder(
         vit_name=vit_name,
         w2v_name=w2v_name,
         embed_dim=embed_dim,
         freeze_backbones=False,
-        average_frame_embeddings=train_cfg.get("average_frame_embeddings", True),
     )
 
     if "model_state_dict" in ckpt:
@@ -194,9 +196,6 @@ def load_model_from_checkpoint(cfg: EvalConfig) -> FaceVoiceDualEncoder:
     if cfg.voice_encoder_path and "model_state_dict" in ckpt:
         voice_state = torch.load(cfg.voice_encoder_path, map_location="cpu")
         _load_model_state_dict(model.w2v, voice_state)
-
-    vit_name = vit_name or ckpt.get("vit_name", "facebook/timesformer-base-finetuned-k400")
-    w2v_name = w2v_name or ckpt.get("w2v_name", "facebook/wav2vec2-base")
 
     model.eval()
     return model

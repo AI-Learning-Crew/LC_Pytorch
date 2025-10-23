@@ -13,6 +13,7 @@ from typing import Dict, List, Tuple, Optional
 
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from transformers import (
@@ -46,6 +47,11 @@ def recall_at_k(sim: torch.Tensor, labels_q: List[str], labels_g: List[str], ks=
     for i in range(Nq):
         qlab = labels_q[i]
         top = ranks[i, :max(ks)].tolist()
+        
+        top10 = ranks[i, : min(10, Ng)].tolist()
+        top10_labels = [labels_g[idx] for idx in top10]
+        print(f"[recall_at_k] Query {i} ({qlab}) top-10: {top10_labels}")
+        
         top_ok = {k: False for k in ks}
         for j, gidx in enumerate(top, start=1):
             if labels_g[gidx] == qlab:
@@ -125,9 +131,11 @@ def collapse_by_id(embs: torch.Tensor, labels: List[str]) -> Tuple[torch.Tensor,
 class EvalConfig:
     meta_path: str = "meta_eval.json"
     root_dir: str = "dataset_root"
-    ckpt_path: str = "checkpoints/dual_encoder_heads.pth"
+    ckpt_path: str = "checkpoints/dual_encoder_full.pth"
     vit_name: Optional[str] = None
     w2v_name: Optional[str] = None
+    video_encoder_path: Optional[str] = None
+    voice_encoder_path: Optional[str] = None
     batch_size: int = 32
     frames_per_sample: int = 8
     frame_sample_mode: str = "uniform"
@@ -137,17 +145,58 @@ class EvalConfig:
     average_by_id: bool = False  # if True, average the 5 items per ID before computing recall
 
 
-def load_model_from_heads(ckpt_path: str, vit_name: Optional[str], w2v_name: Optional[str]) -> FaceVoiceDualEncoder:
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    vit_name = vit_name or ckpt.get("vit_name", "facebook/timesformer-base-finetuned-k400")
-    w2v_name = w2v_name or ckpt.get("w2v_name", "facebook/wav2vec2-base")
+def _load_model_state_dict(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> None:
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        print(f"[load_model] Missing keys when loading state dict: {missing}")
+    if unexpected:
+        print(f"[load_model] Unexpected keys when loading state dict: {unexpected}")
 
-    model = FaceVoiceDualEncoder(vit_name=vit_name, w2v_name=w2v_name, embed_dim=256, freeze_backbones=True)
-    # load heads
-    if "img_proj" in ckpt:
-        model.img_proj.load_state_dict(ckpt["img_proj"]) 
-    if "aud_proj" in ckpt:
-        model.aud_proj.load_state_dict(ckpt["aud_proj"]) 
+
+def load_model_from_checkpoint(cfg: EvalConfig) -> FaceVoiceDualEncoder:
+    ckpt = torch.load(cfg.ckpt_path, map_location="cpu")
+
+    train_cfg = ckpt.get("config", {})
+    embed_dim = train_cfg.get("embed_dim", 256)
+
+    vit_name = cfg.vit_name or train_cfg.get("vit_name") or ckpt.get("vit_name") or "facebook/timesformer-base-finetuned-k400"
+    w2v_name = cfg.w2v_name or train_cfg.get("w2v_name") or ckpt.get("w2v_name") or "facebook/wav2vec2-base"
+    cfg.vit_name = vit_name
+    cfg.w2v_name = w2v_name
+
+    model = FaceVoiceDualEncoder(
+        vit_name=vit_name,
+        w2v_name=w2v_name,
+        embed_dim=embed_dim,
+        freeze_backbones=False,
+    )
+
+    if "model_state_dict" in ckpt:
+        _load_model_state_dict(model, ckpt["model_state_dict"])
+    else:
+        # Backward compatibility with head-only checkpoints
+        if "img_proj" in ckpt:
+            model.img_proj.load_state_dict(ckpt["img_proj"])
+        if "aud_proj" in ckpt:
+            model.aud_proj.load_state_dict(ckpt["aud_proj"])
+        if cfg.video_encoder_path:
+            video_state = torch.load(cfg.video_encoder_path, map_location="cpu")
+            _load_model_state_dict(model.video_encoder, video_state)
+        if cfg.voice_encoder_path:
+            voice_state = torch.load(cfg.voice_encoder_path, map_location="cpu")
+            _load_model_state_dict(model.w2v, voice_state)
+        model.freeze_backbones = True
+        for p in model.parameters():
+            p.requires_grad = False
+
+    # Optionally load external encoder weights if provided
+    if cfg.video_encoder_path and "model_state_dict" in ckpt:
+        video_state = torch.load(cfg.video_encoder_path, map_location="cpu")
+        _load_model_state_dict(model.video_encoder, video_state)
+    if cfg.voice_encoder_path and "model_state_dict" in ckpt:
+        voice_state = torch.load(cfg.voice_encoder_path, map_location="cpu")
+        _load_model_state_dict(model.w2v, voice_state)
+
     model.eval()
     return model
 
@@ -174,7 +223,7 @@ def main(cfg: EvalConfig):
                     collate_fn=collate_fn, drop_last=False, pin_memory=True)
 
     # model
-    model = load_model_from_heads(cfg.ckpt_path, cfg.vit_name, cfg.w2v_name).to(device)
+    model = load_model_from_checkpoint(cfg).to(device)
 
     # embeddings
     img_embs, aud_embs, labels = compute_embeddings(model, dl, use_amp=cfg.mixed_precision)
@@ -224,9 +273,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate dual-encoder on face↔voice retrieval")
     parser.add_argument('--meta_path', type=str, default=os.environ.get("META", "meta_eval.json"))
     parser.add_argument('--root_dir', type=str, default=os.environ.get("ROOT", "dataset_root"))
-    parser.add_argument('--ckpt_path', type=str, default=os.environ.get("CKPT", "checkpoints/dual_encoder_heads.pth"))
+    parser.add_argument('--ckpt_path', type=str, default=os.environ.get("CKPT", "checkpoints/dual_encoder_full.pth"))
     parser.add_argument('--vit_name', type=str, default=os.environ.get("VIT", ""))
     parser.add_argument('--w2v_name', type=str, default=os.environ.get("W2V", ""))
+    parser.add_argument('--video_encoder_path', type=str, default=os.environ.get("VIDEO_CKPT", ""))
+    parser.add_argument('--voice_encoder_path', type=str, default=os.environ.get("VOICE_CKPT", ""))
     parser.add_argument('--batch_size', type=int, default=int(os.environ.get("BATCH", 32)))
     parser.add_argument('--frames_per_sample', type=int, default=int(os.environ.get("K", 8)))
     parser.add_argument('--audio_seconds', type=float, default=float(os.environ.get("ASEC", 2.0)))
@@ -240,6 +291,8 @@ if __name__ == "__main__":
         ckpt_path=args.ckpt_path,
         vit_name=(args.vit_name or None),
         w2v_name=(args.w2v_name or None),
+        video_encoder_path=(args.video_encoder_path or None),
+        voice_encoder_path=(args.voice_encoder_path or None),
         batch_size=args.batch_size,
         frames_per_sample=args.frames_per_sample,
         audio_seconds=args.audio_seconds,

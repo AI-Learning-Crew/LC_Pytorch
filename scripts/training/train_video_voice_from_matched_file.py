@@ -5,7 +5,7 @@
 from __future__ import annotations
 import math, os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -107,19 +107,18 @@ class FaceVoiceDualEncoder(nn.Module):
         pad = clip[-1:].expand(pad_count, -1, -1, -1)
         return torch.cat([clip, pad], dim=0)
 
-    def _video_encode_clip(self, clip: torch.Tensor) -> torch.Tensor:
+    def _video_encode_clip(self, clip: torch.Tensor, enable_grad: bool) -> torch.Tensor:
         """
         clip: (T,3,H,W) -> returns (1,D) CLS embedding
         """
         clip = self._prepare_clip(clip)
         clip = clip.unsqueeze(0)  # (1,T,3,H,W)
-        ctx = torch.no_grad() if self.freeze_backbones else torch.enable_grad()
-        with ctx:
+        with torch.set_grad_enabled(enable_grad):
             out = self.video_encoder(pixel_values=clip, output_hidden_states=False)
             cls = out.last_hidden_state[:, 0, :]  # (1,D)
         return cls
 
-    def encode_images(self, images) -> torch.Tensor:
+    def encode_images(self, images, *, enable_grad: Optional[bool] = None) -> torch.Tensor:
         """
         images:
           - (B,3,H,W)        if averaged in collate, or
@@ -128,6 +127,7 @@ class FaceVoiceDualEncoder(nn.Module):
         returns: (B, d) L2-normalized
         """
         device = next(self.parameters()).device
+        enable_grad = (self.training and not self.freeze_backbones) if enable_grad is None else enable_grad
 
         if isinstance(images, list):
             feats = []
@@ -137,7 +137,7 @@ class FaceVoiceDualEncoder(nn.Module):
                     clip = clip.unsqueeze(0)  # (1,3,H,W)
                 if clip.ndim != 4:
                     raise ValueError(f"Unexpected frame tensor shape: {clip.shape}")
-                feat = self._video_encode_clip(clip)
+                feat = self._video_encode_clip(clip, enable_grad)
                 feats.append(feat)
             img_feats = torch.cat(feats, dim=0)
 
@@ -146,7 +146,7 @@ class FaceVoiceDualEncoder(nn.Module):
             feats = []
             for img in clips:
                 clip = img.unsqueeze(0)  # (1,3,H,W)
-                feat = self._video_encode_clip(clip)
+                feat = self._video_encode_clip(clip, enable_grad)
                 feats.append(feat)
             img_feats = torch.cat(feats, dim=0)
 
@@ -162,7 +162,7 @@ class FaceVoiceDualEncoder(nn.Module):
                     clip = clip[valid]
                 else:
                     clip = clip[:1]
-                feat = self._video_encode_clip(clip)
+                feat = self._video_encode_clip(clip, enable_grad)
                 feats.append(feat)
             img_feats = torch.cat(feats, dim=0)
         else:
@@ -171,7 +171,13 @@ class FaceVoiceDualEncoder(nn.Module):
         img_z = self.img_proj(img_feats)               # (B,d)
         return F.normalize(img_z, p=2, dim=1)
 
-    def encode_audios(self, audio: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def encode_audios(
+        self,
+        audio: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        *,
+        enable_grad: Optional[bool] = None,
+    ) -> torch.Tensor:
         """
         audio: (B, T) padded with zeros
         attention_mask: (B, T) with 1 for real, 0 for pad. If None, infer from audio!=0.
@@ -184,8 +190,9 @@ class FaceVoiceDualEncoder(nn.Module):
             attention_mask = (audio != 0.0).to(audio.dtype)
         attention_mask = attention_mask.to(device)
 
-        ctx = torch.no_grad() if self.freeze_backbones else torch.enable_grad()
-        with ctx:
+        enable_grad = (self.training and not self.freeze_backbones) if enable_grad is None else enable_grad
+
+        with torch.set_grad_enabled(enable_grad):
             out = self.w2v(input_values=audio, attention_mask=attention_mask, output_hidden_states=False)
             # 마스킹 평균
             hidden = out.last_hidden_state  # (B, T', D); W2V는 stride로 T' < T일 수 있음
@@ -195,6 +202,17 @@ class FaceVoiceDualEncoder(nn.Module):
 
         aud_z = self.aud_proj(aud_feat)     # (B, d)
         return F.normalize(aud_z, p=2, dim=1)
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        audio: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        grad_enabled = self.training and not self.freeze_backbones
+        img_z = self.encode_images(images, enable_grad=grad_enabled)
+        aud_z = self.encode_audios(audio, attention_mask=attention_mask, enable_grad=grad_enabled)
+        return img_z, aud_z
 
 
 
@@ -307,8 +325,7 @@ def main(cfg: TrainConfig):
                 opt.zero_grad(set_to_none=True)
 
                 with torch.cuda.amp.autocast(enabled=cfg.mixed_precision):
-                    img_z = model.encode_images(images)
-                    aud_z = model.encode_audios(audios, attention_mask=attn_mask)
+                    img_z, aud_z = model(images, audios, attention_mask=attn_mask)
                     loss = contrastive_loss(img_z, aud_z, tau=cfg.tau)
 
                     # 선택: Top-1 정합(acc) 계산 (모니터링용)
@@ -349,15 +366,19 @@ def main(cfg: TrainConfig):
     save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    torch.save({
+    checkpoint = {
         "config": cfg.__dict__,
-        "img_proj": model.img_proj.state_dict(),
-        "aud_proj": model.aud_proj.state_dict(),
-        "vit_name": cfg.vit_name,
-        "w2v_name": cfg.w2v_name,
-    }, save_dir / "dual_encoder_heads.pth")
-    # Optionally save full model (large):
-    # torch.save(model.state_dict(), save_dir / "full_dual_encoder.pth")
+        "epoch": cfg.max_epochs,
+        "global_step": step,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": opt.state_dict(),
+        "scheduler_state_dict": sched.state_dict(),
+        "scaler_state_dict": scaler.state_dict(),
+    }
+    torch.save(checkpoint, save_dir / "dual_encoder_full.pth")
+
+    torch.save(model.video_encoder.state_dict(), save_dir / "video_encoder.pth")
+    torch.save(model.w2v.state_dict(), save_dir / "voice_encoder.pth")
 
 
 if __name__ == "__main__":

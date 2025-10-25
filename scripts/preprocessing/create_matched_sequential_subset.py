@@ -30,8 +30,11 @@ def resolve_train_dir(dataset_path: Path) -> Path:
         return dataset_path / "train"
     return dataset_path  # 이미 train을 가리키는 경우
 
-def list_subdirs(p: Path) -> List[Path]:
-    return sorted([d for d in p.iterdir() if d.is_dir()], key=lambda x: x.name)
+def list_subdirs(p: Path, limit: Optional[int] = None) -> List[Path]:
+    dirs = sorted([d for d in p.iterdir() if d.is_dir()], key=lambda x: x.name)
+    if limit is not None:
+        return dirs[:limit]
+    return dirs
 
 def list_files(p: Path, exts: Tuple[str, ...]) -> List[Path]:
     exts_lower = tuple(e.lower() for e in exts)
@@ -52,6 +55,7 @@ def build_metadata(
     image_exts: Tuple[str, ...] = (".jpg", ".jpeg", ".png"),
     audio_ext: str = ".wav",
     log_progress: bool = True,
+    max_sessions: Optional[int] = None,
 ) -> Dict[str, Dict[str, Dict[str, object]]]:
     """
     주어진 루트(혹은 train) 디렉토리에서 id/세션별 faces와 voice 상대경로 매핑을 생성
@@ -101,7 +105,7 @@ def build_metadata(
         metadata[id_name] = {}
 
         # 세션은 faces 하위의 폴더 이름으로 판단 (예: 00001)
-        session_dirs = list_subdirs(faces_root)[:5]  # 최대 5개 세션만 사용
+        session_dirs = list_subdirs(faces_root, limit=max_sessions)
         if not session_dirs:
             LOGGER.warning(f"⚠️ {id_name}: faces 하위 세션 폴더가 없어 건너뜀")
             continue
@@ -172,6 +176,10 @@ def parse_args() -> argparse.Namespace:
         "--audio-ext", type=str, default=".wav",
         help="음성 파일 확장자 (기본: .wav)"
     )
+    parser.add_argument(
+        "--sessions-per-id", type=int, default=5,
+        help="각 id에서 사용할 최대 세션 수 (기본: 5, 음수 또는 0이면 제한 없음)"
+    )
     return parser.parse_args()
 
 def main() -> int:
@@ -201,6 +209,7 @@ def main() -> int:
             image_exts=image_exts,
             audio_ext=audio_ext,
             log_progress=True,
+            max_sessions=args.sessions_per_id if args.sessions_per_id > 0 else None,
         )
     except Exception as e:
         LOGGER.exception(f"메타데이터 생성 중 예외 발생: {e}")

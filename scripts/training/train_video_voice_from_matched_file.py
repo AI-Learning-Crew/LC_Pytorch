@@ -3,7 +3,7 @@
 # Description: TimeSformer (video ViT) + Wav2Vec2 dual encoder contrastive training (InfoNCE)
 # =============================================
 from __future__ import annotations
-import math, os
+import math, os, shutil
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -254,6 +254,38 @@ class TrainConfig:
     grad_accum_steps: int = 1
     mixed_precision: bool = True
     save_dir: str = "checkpoints"
+    resume_ckpt: Optional[str] = None
+
+
+def save_epoch_checkpoint(
+    save_dir: Path,
+    model: FaceVoiceDualEncoder,
+    opt: torch.optim.Optimizer,
+    sched,
+    scaler: torch.cuda.amp.GradScaler,
+    cfg: TrainConfig,
+    epoch: int,
+    global_step: int,
+) -> Tuple[Path, Path, Path]:
+    cfg_dict = dict(cfg.__dict__)
+    cfg_dict["resume_ckpt"] = None  # avoid recursive resume references
+    checkpoint = {
+        "config": cfg_dict,
+        "epoch": epoch,
+        "global_step": global_step,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": opt.state_dict(),
+        "scheduler_state_dict": sched.state_dict(),
+        "scaler_state_dict": scaler.state_dict(),
+    }
+    ckpt_path = save_dir / f"dual_encoder_full_epoch{epoch:03d}.pth"
+    torch.save(checkpoint, ckpt_path)
+
+    video_path = save_dir / f"video_encoder_epoch{epoch:03d}.pth"
+    voice_path = save_dir / f"voice_encoder_epoch{epoch:03d}.pth"
+    torch.save(model.video_encoder.state_dict(), video_path)
+    torch.save(model.w2v.state_dict(), voice_path)
+    return ckpt_path, video_path, voice_path
 
 
 def main(cfg: TrainConfig):
@@ -296,9 +328,36 @@ def main(cfg: TrainConfig):
 
     scaler = torch.cuda.amp.GradScaler(enabled=cfg.mixed_precision)
 
-    model.train()
+    save_dir = Path(cfg.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
     step = 0
-    for epoch in range(cfg.max_epochs):
+    start_epoch = 0
+
+    if cfg.resume_ckpt:
+        resume_path = Path(cfg.resume_ckpt)
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"Resume checkpoint가 존재하지 않습니다: {resume_path}")
+        ckpt = torch.load(resume_path, map_location="cpu")
+        model.load_state_dict(ckpt["model_state_dict"])
+        opt.load_state_dict(ckpt["optimizer_state_dict"])
+        sched_state = ckpt.get("scheduler_state_dict")
+        if sched_state is not None:
+            sched.load_state_dict(sched_state)
+        scaler_state = ckpt.get("scaler_state_dict")
+        if scaler_state is not None:
+            scaler.load_state_dict(scaler_state)
+        start_epoch = ckpt.get("epoch", 0)
+        step = ckpt.get("global_step", 0)
+        for state in opt.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+        print(f"Resume from checkpoint {resume_path} (epoch={start_epoch}, global_step={step})")
+
+    model.train()
+    last_ckpt_paths: Optional[Tuple[Path, Path, Path]] = None
+    for epoch in range(start_epoch, cfg.max_epochs):
         print(f"Epoch {epoch + 1}/{cfg.max_epochs}")
         epoch_loss = 0.0
         epoch_acc = 0.0
@@ -360,25 +419,24 @@ def main(cfg: TrainConfig):
         epoch_loss /= batch_count
         epoch_acc /= batch_count
         print(f"Epoch {epoch + 1} Completed: Avg Loss={epoch_loss:.4f}, Avg Acc@1={epoch_acc:.3f}")
+
+        last_ckpt_paths = save_epoch_checkpoint(
+            save_dir=save_dir,
+            model=model,
+            opt=opt,
+            sched=sched,
+            scaler=scaler,
+            cfg=cfg,
+            epoch=epoch + 1,
+            global_step=step,
+        )
     
-    # save
-    from pathlib import Path
-    save_dir = Path(cfg.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    checkpoint = {
-        "config": cfg.__dict__,
-        "epoch": cfg.max_epochs,
-        "global_step": step,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": opt.state_dict(),
-        "scheduler_state_dict": sched.state_dict(),
-        "scaler_state_dict": scaler.state_dict(),
-    }
-    torch.save(checkpoint, save_dir / "dual_encoder_full.pth")
-
-    torch.save(model.video_encoder.state_dict(), save_dir / "video_encoder.pth")
-    torch.save(model.w2v.state_dict(), save_dir / "voice_encoder.pth")
+    # save latest aliases for convenience
+    if last_ckpt_paths:
+        ckpt_path, video_path, voice_path = last_ckpt_paths
+        shutil.copy2(ckpt_path, save_dir / "dual_encoder_full.pth")
+        shutil.copy2(video_path, save_dir / "video_encoder.pth")
+        shutil.copy2(voice_path, save_dir / "voice_encoder.pth")
 
 
 if __name__ == "__main__":
@@ -403,6 +461,8 @@ if __name__ == "__main__":
                         help='학습률 (기본값: 3e-5)')
     parser.add_argument('--audio_seconds', type=float, default=float(os.environ.get("ASEC", 2.0)),
                         help='오디오 길이 (초) (기본값: 2.0)')
+    parser.add_argument('--resume_ckpt', type=str, default=os.environ.get("RESUME", ""),
+                        help='이 체크포인트에서 학습을 재개합니다 (dual_encoder_full_epochXXX.pth)')
     
     args = parser.parse_args()
     
@@ -416,6 +476,7 @@ if __name__ == "__main__":
         lr=args.lr,
         audio_seconds=args.audio_seconds,
         save_dir=args.save_dir,
+        resume_ckpt=(args.resume_ckpt or None),
     )
     
     main(cfg)

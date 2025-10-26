@@ -6,6 +6,10 @@ import sys
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, Optional, Tuple
 
+
+# 프로젝트 루트를 Python 경로에 추가하여 모듈 import 가능하게 함
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+
 from utils.wav2mel import wav_to_mel
 
 

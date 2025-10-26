@@ -420,6 +420,7 @@ def main(cfg: TrainConfig):
         epoch_acc /= batch_count
         print(f"Epoch {epoch + 1} Completed: Avg Loss={epoch_loss:.4f}, Avg Acc@1={epoch_acc:.3f}")
 
+        
         last_ckpt_paths = save_epoch_checkpoint(
             save_dir=save_dir,
             model=model,

@@ -33,3 +33,7 @@ torchaudio==2.8.0
 # 오디오 처리 라이브러리
 torchcodec
 torchvision>=0.16.0
+# VAD 및 Mel 스펙트로그램 생성을 위한 의존성
+python_speech_features>=0.6
+webrtcvad>=2.0.10
+pydub>=0.25.1

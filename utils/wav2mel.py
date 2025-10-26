@@ -14,20 +14,35 @@ from _thread import start_new_thread
 import queue
 from python_speech_features import logfbank
 import webrtcvad
+from pydub import AudioSegment
 try:
     import vad_ex
 except:
     from utils import vad_ex
 
 
+SUPPORTED_VAD_SAMPLE_RATES = {8000, 16000, 32000, 48000}
+
+
+def _ensure_supported_sample_rate(path: str, audio_bytes: bytes, sample_rate: int) -> tuple[bytes, int]:
+    if sample_rate in SUPPORTED_VAD_SAMPLE_RATES:
+        return audio_bytes, sample_rate
+
+    segment = AudioSegment.from_file(path)
+    segment = segment.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+    return segment.raw_data, segment.frame_rate
+
+
 def vad_process(path):
-    # VAD Process
+    path = str(path)
     if path.endswith('.wav'):
         audio, sample_rate = vad_ex.read_wave(path)
     elif path.endswith('.m4a'):
         audio, sample_rate = vad_ex.read_m4a(path)
     else:
         raise TypeError('Unsupported file type: {}'.format(path.split('.')[-1]))
+
+    audio, sample_rate = _ensure_supported_sample_rate(path, audio, sample_rate)
 
     vad = webrtcvad.Vad(1)
     frames = vad_ex.frame_generator(30, audio, sample_rate)
@@ -45,6 +60,7 @@ def vad_process(path):
 
 
 def wav_to_mel(path, nfilt=40):
+    path = str(path)
     '''
     Output shape: (nfilt, length)
     '''

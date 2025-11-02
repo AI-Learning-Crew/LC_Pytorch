@@ -55,7 +55,7 @@ def flatten_meta(meta_obj):
 
 # ---- Dataset ---------------------------------------------------------------
 
-class FaceVoiceDatasetHF(Dataset):
+class FacesMelDataset(Dataset):
     def __init__(
         self,
         meta_path: str | Path,
@@ -89,7 +89,7 @@ class FaceVoiceDatasetHF(Dataset):
         try:
             return Image.open(p).convert("RGB")
         except (FileNotFoundError, OSError) as exc:
-            print(f"[FaceVoiceDatasetHF] Failed to load image {p}: {exc}")
+            print(f"[FacesMelDataset] Failed to load image {p}: {exc}")
             return None
 
     def _get_item(self, idx: int, depth: int = 0) -> Dict[str, Any]:
@@ -105,62 +105,52 @@ class FaceVoiceDatasetHF(Dataset):
                 images.append(img)
 
         if not images:
-            print(f"[FaceVoiceDatasetHF] No valid frames for pid={r['id']} session={r['session']}. Retrying with next sample.")
+            print(f"[FacesMelDataset] No valid frames for pid={r['id']} session={r['session']}. Retrying with next sample.")
             return self._get_item((idx + 1) % len(self.records), depth + 1)
 
         mel_path = self._resolve_mel_path(r)
         if mel_path is None:
-            print(f"[FaceVoiceDatasetHF][WARN] Mel file missing for pid={r['id']} session={r['session']}. Retrying next sample.")
+            print(f"[FacesMelDataset][WARN] Mel file missing for pid={r['id']} session={r['session']}. Retrying next sample.")
             return self._get_item((idx + 1) % len(self.records), depth + 1)
 
         try:
             with mel_path.open("rb") as f:
                 mel_payload = pickle.load(f)
         except Exception as exc:
-            print(f"[FaceVoiceDatasetHF][WARN] Failed to load mel pickle {mel_path}: {exc}")
+            print(f"[FacesMelDataset][WARN] Failed to load mel pickle {mel_path}: {exc}")
             return self._get_item((idx + 1) % len(self.records), depth + 1)
 
         log_mel = mel_payload.get("log_mel")
         if log_mel is None:
-            print(f"[FaceVoiceDatasetHF][WARN] Missing 'log_mel' in {mel_path}. Retrying next sample.")
+            print(f"[FacesMelDataset][WARN] Missing 'log_mel' in {mel_path}. Retrying next sample.")
             return self._get_item((idx + 1) % len(self.records), depth + 1)
 
         log_mel = np.asarray(log_mel, dtype=np.float32)
         if log_mel.ndim != 2:
-            print(f"[FaceVoiceDatasetHF][WARN] Unexpected mel shape {log_mel.shape} in {mel_path}. Retrying next sample.")
+            print(f"[FacesMelDataset][WARN] Unexpected mel shape {log_mel.shape} in {mel_path}. Retrying next sample.")
             return self._get_item((idx + 1) % len(self.records), depth + 1)
 
         mel_tensor = torch.from_numpy(log_mel.T.copy())  # (time, freq)
 
         return {
             "images": images,        # list[PIL.Image] (K)
-            "audio": mel_tensor,     # (time, freq)
+            "mel": mel_tensor,       # (time, freq)
             "pid": r["id"],
             "session": r["session"],
         }
 
     def _resolve_mel_path(self, record: Dict[str, Any]) -> Path | None:
-        candidates = []
-        voice_rel = Path(record["voice"])
-
-        # candidate within root structure: replace voices -> mel
         mel_rel = record.get("mel")
         if mel_rel:
-            candidates.append(self.root / mel_rel)
-
-        try:
-            voice_parent = voice_rel.parent
-            mel_candidate = self.root / voice_parent.parent / "mel" / f"{voice_rel.stem}.pickle"
-            candidates.append(mel_candidate)
-        except Exception:
-            pass
+            mel_path = self.root / mel_rel
+            if mel_path.is_file():
+                return mel_path
 
         if self.mel_root is not None:
-            candidates.append(self.mel_root / record["id"] / "mel" / f"{record['session']}.pickle")
+            mel_path = self.mel_root / record["id"] / "mel" / f"{record['session']}.pickle"
+            if mel_path.is_file():
+                return mel_path
 
-        for p in candidates:
-            if p.is_file():
-                return p
         return None
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
@@ -227,10 +217,18 @@ def make_collate_fn(image_processor):
             padded_list.append(padded)
         videos = torch.stack(padded_list, dim=0)  # (B,K,3,H,W)
 
-        # ----- audios -----
-        audios = [b["audio"] for b in batch]  # list[(T_i,)]
-        padded_audios = pad_sequence(audios, batch_first=True, padding_value=0.0)  # (B, Tmax)
+        # ----- mel spectrograms -----
+        mel_seqs = [b["mel"] for b in batch]
+        if not mel_seqs:
+            raise RuntimeError("Batch contains no mel tensors.")
+
+        freq_bins = mel_seqs[0].size(1)
+        max_len = max(mel.size(0) for mel in mel_seqs)
+        padded_mels = torch.zeros(len(mel_seqs), max_len, freq_bins, dtype=mel_seqs[0].dtype)
+        for i, mel in enumerate(mel_seqs):
+            length = mel.size(0)
+            padded_mels[i, :length] = mel
 
         meta = [{"pid": b["pid"], "session": b["session"]} for b in batch]
-        return {"images": videos, "audio": padded_audios, "meta": meta}
+        return {"images": videos, "mel": padded_mels, "meta": meta}
     return collate

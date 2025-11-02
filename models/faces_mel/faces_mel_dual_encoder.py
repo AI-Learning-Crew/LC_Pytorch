@@ -1,11 +1,13 @@
-import torch
-from typing import Optional, Tuple
-from transformers import TimesformerModel, Wav2Vec2Model
-
 import torch.nn as nn
 import torch.nn.functional as F
+import torch
+from transformers import TimesformerModel
+from typing import Optional, Tuple
+
+from utils.voice_encoders import TransEncoder
 # If running as a single file, the definitions above would be in the same module.
 # Otherwise, import as:
+# from dataset_face_voice_hf import FaceVoiceDatasetHF, make_collate_fn
 
 # ---- Projection heads ------------------------------------------------------
 
@@ -27,31 +29,42 @@ class ProjectionHead(nn.Module):
 
 # ---- Dual encoder wrapper --------------------------------------------------
 
-class FaceVoiceDualEncoder(nn.Module):
-    def __init__(self,
-                 vit_name: str = "facebook/timesformer-base-finetuned-k400",
-                 w2v_name: str = "facebook/wav2vec2-base",
-                 embed_dim: int = 256,
-                 freeze_backbones: bool = False,
-                 average_frame_embeddings: bool = True):
+class FacesMelDualEncoder(nn.Module):
+    def __init__(
+        self,
+        vit_name: str = "facebook/timesformer-base-finetuned-k400",
+        embed_dim: int = 256,
+        mel_freq_bins: int = 40,
+        freeze_backbones: bool = False,
+        average_frame_embeddings: bool = True,
+    ) -> None:
         super().__init__()
         self.video_encoder = TimesformerModel.from_pretrained(vit_name)
-        self.w2v = Wav2Vec2Model.from_pretrained(w2v_name)
         self.average_frame_embeddings = average_frame_embeddings
         self.freeze_backbones = freeze_backbones
 
         vit_out = self.video_encoder.config.hidden_size
-        w2v_out = self.w2v.config.hidden_size
 
         self.img_proj = ProjectionHead(vit_out, embed_dim, hidden_dim=vit_out)
-        self.aud_proj = ProjectionHead(w2v_out, embed_dim, hidden_dim=w2v_out)
+
+        self.mel_feat_dim = 512
+        self.mel_encoder = TransEncoder(
+            input_channel=mel_freq_bins,
+            cnn_channels=[self.mel_feat_dim, self.mel_feat_dim],
+            transformer_dim=self.mel_feat_dim,
+            transformer_depth=2,
+            return_seq=False,
+            pos_embedding_dim=0,
+            sin_pos_encoding=True,
+        )
+        self.mel_proj = ProjectionHead(self.mel_feat_dim, embed_dim, hidden_dim=self.mel_feat_dim)
 
         self.required_frames = getattr(self.video_encoder.config, "num_frames", None)
 
         if freeze_backbones:
             for p in self.video_encoder.parameters():
                 p.requires_grad = False
-            for p in self.w2v.parameters():
+            for p in self.mel_encoder.parameters():
                 p.requires_grad = False
 
     def _prepare_clip(self, clip: torch.Tensor) -> torch.Tensor:
@@ -142,45 +155,43 @@ class FaceVoiceDualEncoder(nn.Module):
         img_z = self.img_proj(img_feats)               # (B,d)
         return F.normalize(img_z, p=2, dim=1)
 
-    def encode_audios(
+    def encode_mel(
         self,
-        audio: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        mel: torch.Tensor,
         *,
         enable_grad: Optional[bool] = None,
     ) -> torch.Tensor:
         """
-        audio: (B, T) padded with zeros
-        attention_mask: (B, T) with 1 for real, 0 for pad. If None, infer from audio!=0.
+        mel: (B, T, F) log-mel spectrograms
         returns: (B, d) L2-normalized
         """
         device = next(self.parameters()).device
-        audio = audio.to(device)
+        mel = mel.to(device)
 
-        if attention_mask is None:
-            attention_mask = (audio != 0.0).to(audio.dtype)
-        attention_mask = attention_mask.to(device)
+        if mel.ndim != 3:
+            raise ValueError(f"Expected mel tensor of shape (B,T,F); got {mel.shape}")
 
-        enable_grad = (self.training and not self.freeze_backbones) if enable_grad is None else enable_grad
+        mel_seq = mel.transpose(1, 2).contiguous()
 
-        with torch.set_grad_enabled(enable_grad):
-            out = self.w2v(input_values=audio, attention_mask=attention_mask, output_hidden_states=False)
-            # 마스킹 평균
-            hidden = out.last_hidden_state  # (B, T', D); W2V는 stride로 T' < T일 수 있음
-            # Wav2Vec2는 내부 다운샘플로 attention_mask도 다운샘플 안 됨.
-            # 간단 대안: hidden의 시간축 mean (실무에선 CTC mask/특징 길이로 정교화 권장)
-            aud_feat = hidden.mean(dim=1)   # (B, D)
+        grad_enabled = (self.training and not self.freeze_backbones) if enable_grad is None else enable_grad
+        with torch.set_grad_enabled(grad_enabled):
+            mel_embeddings = self.mel_encoder(mel_seq)
 
-        aud_z = self.aud_proj(aud_feat)     # (B, d)
+        if mel_embeddings.ndim > 2:
+            mel_feat = mel_embeddings.flatten(start_dim=1)
+        else:
+            mel_feat = mel_embeddings
+
+        aud_z = self.mel_proj(mel_feat)
         return F.normalize(aud_z, p=2, dim=1)
 
     def forward(
         self,
         images: torch.Tensor,
-        audio: torch.Tensor,
+        mel: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         grad_enabled = self.training and not self.freeze_backbones
         img_z = self.encode_images(images, enable_grad=grad_enabled)
-        aud_z = self.encode_audios(audio, attention_mask=attention_mask, enable_grad=grad_enabled)
-        return img_z, aud_z
+        mel_z = self.encode_mel(mel, enable_grad=grad_enabled)
+        return img_z, mel_z

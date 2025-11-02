@@ -64,7 +64,8 @@ def build_metadata(
         "id00001": {
             "00001": {
                 "faces": ["train/id00001/faces/00001/frame_0001.jpg", ...],
-                "voice":  "train/id00001/voices/00001.wav"
+                "voice":  "train/id00001/voices/00001.wav",
+                "mel":    "train/id00001/mel/00001.pickle"
             },
             ...
         },
@@ -89,6 +90,7 @@ def build_metadata(
     num_sessions_total = 0
     num_frames_total = 0
     num_voice_missing = 0
+    num_mel_missing = 0
     num_faces_missing = 0
 
     for idx, id_dir in enumerate(id_dirs, 1):
@@ -132,9 +134,19 @@ def build_metadata(
                 num_voice_missing += 1
                 LOGGER.warning(f"⚠️ {id_name}/{session_name}: voice 파일이 없습니다 -> {voice_path.name}")
 
+            mel_root = id_dir / "mel"
+            mel_path = mel_root / f"{session_name}.pickle"
+            mel_rel: Optional[str] = None
+            if mel_path.exists() and mel_path.is_file():
+                mel_rel = str(mel_path.relative_to(root_dir))
+            else:
+                num_mel_missing += 1
+                LOGGER.warning(f"⚠️ {id_name}/{session_name}: mel 파일이 없습니다 -> {mel_path.name}")
+
             metadata[id_name][session_name] = {
                 "faces": faces_rel,
                 "voice": voice_rel,
+                "mel": mel_rel,
             }
             num_sessions_total += 1
 
@@ -145,11 +157,12 @@ def build_metadata(
     if log_progress:
         dt_total = time.time() - t0
         LOGGER.info(
-            "요약 | IDs: %d, 세션: %d, 총 프레임: %d, 음성 누락 세션: %d, 얼굴 누락 세션: %d, 총 소요: %.2fs",
+            "요약 | IDs: %d, 세션: %d, 총 프레임: %d, 음성 누락 세션: %d, mel 누락 세션: %d, 얼굴 누락 세션: %d, 총 소요: %.2fs",
             len(metadata),
             num_sessions_total,
             num_frames_total,
             num_voice_missing,
+            num_mel_missing,
             num_faces_missing,
             dt_total,
         )

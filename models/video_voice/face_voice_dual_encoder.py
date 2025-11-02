@@ -1,17 +1,14 @@
-# =============================================
-# File: face_voice_dual_encoder.py
-# Description: Shared TimeSformer + Wav2Vec2 dual encoder module
-# =============================================
-from __future__ import annotations
-
-from typing import Optional
-
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
+from typing import Optional, Tuple
 from transformers import TimesformerModel, Wav2Vec2Model
 
+import torch.nn as nn
+import torch.nn.functional as F
+# If running as a single file, the definitions above would be in the same module.
+# Otherwise, import as:
+# from dataset_face_voice_hf import FaceVoiceDatasetHF, make_collate_fn
+
+# ---- Projection heads ------------------------------------------------------
 
 class ProjectionHead(nn.Module):
     def __init__(self, in_dim: int, out_dim: int = 256, hidden_dim: Optional[int] = None, dropout: float = 0.0):
@@ -24,21 +21,24 @@ class ProjectionHead(nn.Module):
         else:
             self.net = nn.Linear(in_dim, out_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.normalize(self.net(x), dim=-1)
+    def forward(self, x):
+        x = self.net(x)
+        x = nn.functional.normalize(x, dim=-1)
+        return x
 
+# ---- Dual encoder wrapper --------------------------------------------------
 
 class FaceVoiceDualEncoder(nn.Module):
-    def __init__(
-        self,
-        vit_name: str = "facebook/timesformer-base-finetuned-k400",
-        w2v_name: str = "facebook/wav2vec2-base",
-        embed_dim: int = 256,
-        freeze_backbones: bool = False,
-    ) -> None:
+    def __init__(self,
+                 vit_name: str = "facebook/timesformer-base-finetuned-k400",
+                 w2v_name: str = "facebook/wav2vec2-base",
+                 embed_dim: int = 256,
+                 freeze_backbones: bool = False,
+                 average_frame_embeddings: bool = True):
         super().__init__()
         self.video_encoder = TimesformerModel.from_pretrained(vit_name)
         self.w2v = Wav2Vec2Model.from_pretrained(w2v_name)
+        self.average_frame_embeddings = average_frame_embeddings
         self.freeze_backbones = freeze_backbones
 
         vit_out = self.video_encoder.config.hidden_size
@@ -56,6 +56,10 @@ class FaceVoiceDualEncoder(nn.Module):
                 p.requires_grad = False
 
     def _prepare_clip(self, clip: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize clip length to match the video encoder requirement.
+        clip: (T, 3, H, W)
+        """
         if clip.ndim != 4:
             raise ValueError(f"Expected clip tensor (frames,3,H,W); got {clip.shape}")
 
@@ -67,42 +71,57 @@ class FaceVoiceDualEncoder(nn.Module):
         if current == target:
             return clip
         if current > target:
-            idxs = torch.linspace(0, current - 1, steps=target, device=clip.device).round().long()
+            idxs = torch.linspace(0, current - 1, steps=target, device=clip.device)
+            idxs = idxs.round().long()
             return clip.index_select(0, idxs)
-
+        # current < target: pad by repeating last frame
         pad_count = target - current
         pad = clip[-1:].expand(pad_count, -1, -1, -1)
         return torch.cat([clip, pad], dim=0)
 
-    def _video_encode_clip(self, clip: torch.Tensor) -> torch.Tensor:
-        clip = self._prepare_clip(clip).unsqueeze(0)  # (1,T,3,H,W)
-        ctx = torch.no_grad() if self.freeze_backbones else torch.enable_grad()
-        with ctx:
+    def _video_encode_clip(self, clip: torch.Tensor, enable_grad: bool) -> torch.Tensor:
+        """
+        clip: (T,3,H,W) -> returns (1,D) CLS embedding
+        """
+        clip = self._prepare_clip(clip)
+        clip = clip.unsqueeze(0)  # (1,T,3,H,W)
+        with torch.set_grad_enabled(enable_grad):
             out = self.video_encoder(pixel_values=clip, output_hidden_states=False)
-            cls = out.last_hidden_state[:, 0, :]
+            cls = out.last_hidden_state[:, 0, :]  # (1,D)
         return cls
 
-    @torch.no_grad()
-    def encode_images(self, images) -> torch.Tensor:
+    def encode_images(self, images, *, enable_grad: Optional[bool] = None) -> torch.Tensor:
+        """
+        images:
+          - (B,3,H,W)        if averaged in collate, or
+          - (B,K,3,H,W)      if not averaged, or
+          - list[(K,3,H,W)]  legacy
+        returns: (B, d) L2-normalized
+        """
         device = next(self.parameters()).device
+        enable_grad = (self.training and not self.freeze_backbones) if enable_grad is None else enable_grad
 
         if isinstance(images, list):
             feats = []
             for clip in images:
                 clip = clip.to(device)
                 if clip.ndim == 3:
-                    clip = clip.unsqueeze(0)
+                    clip = clip.unsqueeze(0)  # (1,3,H,W)
                 if clip.ndim != 4:
                     raise ValueError(f"Unexpected frame tensor shape: {clip.shape}")
-                feats.append(self._video_encode_clip(clip))
+                feat = self._video_encode_clip(clip, enable_grad)
+                feats.append(feat)
             img_feats = torch.cat(feats, dim=0)
+
         elif images.ndim == 4:  # (B,3,H,W)
             clips = images.to(device)
             feats = []
             for img in clips:
-                clip = img.unsqueeze(0)
-                feats.append(self._video_encode_clip(clip))
+                clip = img.unsqueeze(0)  # (1,3,H,W)
+                feat = self._video_encode_clip(clip, enable_grad)
+                feats.append(feat)
             img_feats = torch.cat(feats, dim=0)
+
         elif images.ndim == 5:  # (B,K,3,H,W)
             B, K = images.shape[:2]
             clips = images.to(device)
@@ -111,26 +130,58 @@ class FaceVoiceDualEncoder(nn.Module):
                 clip = clips[b]
                 flat = clip.view(K, -1)
                 valid = flat.abs().sum(dim=1) > 0
-                clip = clip[valid] if valid.any() else clip[:1]
-                feats.append(self._video_encode_clip(clip))
+                if valid.any():
+                    clip = clip[valid]
+                else:
+                    clip = clip[:1]
+                feat = self._video_encode_clip(clip, enable_grad)
+                feats.append(feat)
             img_feats = torch.cat(feats, dim=0)
         else:
             raise ValueError(f"Unexpected images shape: {getattr(images, 'shape', None)}")
 
-        return self.img_proj(img_feats)
+        img_z = self.img_proj(img_feats)               # (B,d)
+        return F.normalize(img_z, p=2, dim=1)
 
-    @torch.no_grad()
-    def encode_audios(self, audio: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def encode_audios(
+        self,
+        audio: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        *,
+        enable_grad: Optional[bool] = None,
+    ) -> torch.Tensor:
+        """
+        audio: (B, T) padded with zeros
+        attention_mask: (B, T) with 1 for real, 0 for pad. If None, infer from audio!=0.
+        returns: (B, d) L2-normalized
+        """
         device = next(self.parameters()).device
         audio = audio.to(device)
+
         if attention_mask is None:
             attention_mask = (audio != 0.0).to(audio.dtype)
         attention_mask = attention_mask.to(device)
 
-        out = self.w2v(input_values=audio, attention_mask=attention_mask, output_hidden_states=False)
-        hidden = out.last_hidden_state
-        aud_feat = hidden.mean(dim=1)
-        return self.aud_proj(aud_feat)
+        enable_grad = (self.training and not self.freeze_backbones) if enable_grad is None else enable_grad
 
+        with torch.set_grad_enabled(enable_grad):
+            out = self.w2v(input_values=audio, attention_mask=attention_mask, output_hidden_states=False)
+            # 마스킹 평균
+            hidden = out.last_hidden_state  # (B, T', D); W2V는 stride로 T' < T일 수 있음
+            # Wav2Vec2는 내부 다운샘플로 attention_mask도 다운샘플 안 됨.
+            # 간단 대안: hidden의 시간축 mean (실무에선 CTC mask/특징 길이로 정교화 권장)
+            aud_feat = hidden.mean(dim=1)   # (B, D)
 
-__all__ = ["FaceVoiceDualEncoder"]
+        aud_z = self.aud_proj(aud_feat)     # (B, d)
+        return F.normalize(aud_z, p=2, dim=1)
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        audio: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        grad_enabled = self.training and not self.freeze_backbones
+        img_z = self.encode_images(images, enable_grad=grad_enabled)
+        aud_z = self.encode_audios(audio, attention_mask=attention_mask, enable_grad=grad_enabled)
+        return img_z, aud_z

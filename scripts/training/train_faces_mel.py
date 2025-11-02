@@ -1,6 +1,6 @@
 # =============================================
-# File: train_face_voice_contrast_hf.py
-# Description: TimeSformer (video ViT) + Wav2Vec2 dual encoder contrastive training (InfoNCE)
+# File: train_faces_mel.py
+# Description: TimeSformer (video ViT) + Transformer mel encoder contrastive training (InfoNCE)
 # =============================================
 
 from __future__ import annotations
@@ -17,11 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from transformers import (
-    AutoImageProcessor,
-    Wav2Vec2Processor,
-    get_cosine_schedule_with_warmup,
-)
+from transformers import AutoImageProcessor, get_cosine_schedule_with_warmup
 
 from tqdm import tqdm
 
@@ -30,22 +26,22 @@ project_root = Path(__file__).parent.parent.parent
 import sys
 sys.path.insert(0, str(project_root))
 
-from models.video_voice.dataset_face_voice_hf import FaceVoiceDatasetHF, make_collate_fn
-from models.video_voice.face_voice_dual_encoder import FaceVoiceDualEncoder
+from models.faces_mel.dataset_faces_mel import FacesMelDataset, make_collate_fn
+from models.faces_mel.faces_mel_dual_encoder import FacesMelDualEncoder
 
 
 # ---- Loss ------------------------------------------------------------------
 
-def contrastive_loss(img_z: torch.Tensor, aud_z: torch.Tensor, tau: float = 0.07) -> torch.Tensor:
+def contrastive_loss(img_z: torch.Tensor, mel_z: torch.Tensor, tau: float = 0.07) -> torch.Tensor:
     """Computes the contrastive loss using InfoNCE."""
     img_z = F.normalize(img_z, dim=-1)
-    aud_z = F.normalize(aud_z, dim=-1)
+    mel_z = F.normalize(mel_z, dim=-1)
 
-    logits = img_z @ aud_z.t() / tau  # (B, B)
+    logits = img_z @ mel_z.t() / tau  # (B, B)
     targets = torch.arange(logits.size(0), device=logits.device)  # (B,)
 
-    loss_i = F.cross_entropy(logits, targets)         # Image → Audio
-    loss_a = F.cross_entropy(logits.t(), targets)     # Audio → Image
+    loss_i = F.cross_entropy(logits, targets)         # Image → Mel
+    loss_a = F.cross_entropy(logits.t(), targets)     # Mel → Image
     return (loss_i + loss_a) / 2.0
 
 
@@ -55,12 +51,12 @@ def contrastive_loss(img_z: torch.Tensor, aud_z: torch.Tensor, tau: float = 0.07
 class TrainConfig:
     meta_path: str = "meta.json"
     root_dir: str = "dataset_root"
+    mel_root: Optional[str] = None
     vit_name: str = "facebook/timesformer-base-finetuned-k400"
-    w2v_name: str = "facebook/wav2vec2-base"
     batch_size: int = 16
     frames_per_sample: int = 8
     frame_sample_mode: str = "uniform"
-    audio_seconds: float = 2.0
+    mel_freq_bins: int = 40
     lr: float = 3e-5
     weight_decay: float = 0.01
     max_epochs: int = 10
@@ -79,7 +75,7 @@ class TrainConfig:
 
 def save_epoch_checkpoint(
     save_dir: Path,
-    model: FaceVoiceDualEncoder,
+    model: FacesMelDualEncoder,
     opt: torch.optim.Optimizer,
     sched,
     scaler: torch.cuda.amp.GradScaler,
@@ -103,16 +99,16 @@ def save_epoch_checkpoint(
     torch.save(checkpoint, ckpt_path)
 
     video_path = save_dir / f"video_encoder_epoch{epoch:03d}.pth"
-    voice_path = save_dir / f"voice_encoder_epoch{epoch:03d}.pth"
+    mel_path = save_dir / f"mel_encoder_epoch{epoch:03d}.pth"
     torch.save(model.video_encoder.state_dict(), video_path)
-    torch.save(model.w2v.state_dict(), voice_path)
-    return ckpt_path, video_path, voice_path
+    torch.save(model.mel_encoder.state_dict(), mel_path)
+    return ckpt_path, video_path, mel_path
 
 
 # ---- Training Loop ---------------------------------------------------------
 
 def train_one_epoch(
-    model: FaceVoiceDualEncoder,
+    model: FacesMelDualEncoder,
     dataloader: DataLoader,
     opt: torch.optim.Optimizer,
     scaler: torch.cuda.amp.GradScaler,
@@ -131,17 +127,16 @@ def train_one_epoch(
     for batch in tqdm(dataloader, desc=f"Training Epoch {epoch + 1}/{cfg.max_epochs}", leave=False):
         try:
             images = batch["images"].to(device, non_blocking=True)
-            audios = batch["audio"].to(device, non_blocking=True)
-            attn_mask = (audios != 0).to(torch.long)
+            mels = batch["mel"].to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(enabled=cfg.mixed_precision):
-                img_z, aud_z = model(images, audios, attention_mask=attn_mask)
-                loss = contrastive_loss(img_z, aud_z, tau=cfg.tau)
+                img_z, mel_z = model(images, mels)
+                loss = contrastive_loss(img_z, mel_z, tau=cfg.tau)
 
                 with torch.no_grad():
-                    logits = F.normalize(img_z, dim=-1) @ F.normalize(aud_z, dim=-1).t()
+                    logits = F.normalize(img_z, dim=-1) @ F.normalize(mel_z, dim=-1).t()
                     tgt = torch.arange(logits.size(0), device=logits.device)
                     acc_i = (logits.argmax(dim=1) == tgt).float().mean()
                     acc_a = (logits.argmax(dim=0) == tgt).float().mean()
@@ -172,19 +167,16 @@ def train_one_epoch(
 def main(cfg: TrainConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Initialize processors
+    # Initialize processor for image frames
     image_processor = AutoImageProcessor.from_pretrained(cfg.vit_name)
-    wav2vec2_processor = Wav2Vec2Processor.from_pretrained(cfg.w2v_name)
 
     # Dataset and DataLoader
-    ds = FaceVoiceDatasetHF(
+    ds = FacesMelDataset(
         meta_path=cfg.meta_path,
         root_dir=cfg.root_dir,
+        mel_root=cfg.mel_root,
         frames_per_sample=cfg.frames_per_sample,
         frame_sample_mode=cfg.frame_sample_mode,
-        audio_processor=wav2vec2_processor,
-        audio_seconds=cfg.audio_seconds,
-        target_sr=wav2vec2_processor.feature_extractor.sampling_rate,
     )
     collate_fn = make_collate_fn(image_processor)
     dl = DataLoader(
@@ -198,10 +190,17 @@ def main(cfg: TrainConfig):
     )
 
     # Model
-    model = FaceVoiceDualEncoder(
+    mel_freq_bins = cfg.mel_freq_bins
+    if mel_freq_bins <= 0:
+        if len(ds) == 0:
+            raise ValueError("Dataset is empty; cannot infer mel frequency bins.")
+        sample = ds[0]["mel"]
+        mel_freq_bins = sample.size(1)
+
+    model = FacesMelDualEncoder(
         vit_name=cfg.vit_name,
-        w2v_name=cfg.w2v_name,
         embed_dim=cfg.embed_dim,
+        mel_freq_bins=mel_freq_bins,
         freeze_backbones=cfg.freeze_backbones,
         average_frame_embeddings=True,
     ).to(device)
@@ -260,28 +259,32 @@ def main(cfg: TrainConfig):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train face-voice matching model.")
+    parser = argparse.ArgumentParser(description="Train face-mel contrastive model.")
     parser.add_argument("--meta_path", type=str, default="meta.json", help="Path to meta file.")
     parser.add_argument("--root_dir", type=str, default="dataset_root", help="Dataset root directory.")
+    parser.add_argument("--mel_root", type=str, default="", help="Optional directory that mirrors mel pickles.")
     parser.add_argument("--save_dir", type=str, default="checkpoints", help="Directory to save checkpoints.")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size.")
     parser.add_argument("--frames_per_sample", type=int, default=8, help="Frames per sample.")
+    parser.add_argument("--frame_sample_mode", type=str, default="uniform", help="How to sample frames per video.")
     parser.add_argument("--max_epochs", type=int, default=5, help="Maximum number of epochs.")
     parser.add_argument("--freeze_backbones", type=int, default=0, help="Freeze backbones (0: False, 1: True).")
     parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate.")
-    parser.add_argument("--audio_seconds", type=float, default=2.0, help="Audio length in seconds.")
+    parser.add_argument("--mel_freq_bins", type=int, default=40, help="Mel frequency bins (set 0 to infer from dataset).")
     parser.add_argument("--resume_ckpt", type=str, default="", help="Path to resume checkpoint.")
     args = parser.parse_args()
 
     cfg = TrainConfig(
         meta_path=args.meta_path,
         root_dir=args.root_dir,
+        mel_root=args.mel_root or None,
         batch_size=args.batch_size,
         frames_per_sample=args.frames_per_sample,
+        frame_sample_mode=args.frame_sample_mode,
         max_epochs=args.max_epochs,
         freeze_backbones=bool(args.freeze_backbones),
         lr=args.lr,
-        audio_seconds=args.audio_seconds,
+        mel_freq_bins=args.mel_freq_bins,
         save_dir=args.save_dir,
         resume_ckpt=args.resume_ckpt or None,
     )

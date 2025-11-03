@@ -6,6 +6,7 @@
 from __future__ import annotations
 import os
 import math
+import logging
 import shutil
 import argparse
 from pathlib import Path
@@ -28,6 +29,9 @@ sys.path.insert(0, str(project_root))
 
 from models.faces_mel.dataset_faces_mel import FacesMelDataset, make_collate_fn
 from models.faces_mel.faces_mel_dual_encoder import FacesMelDualEncoder
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---- Loss ------------------------------------------------------------------
@@ -153,11 +157,15 @@ def train_one_epoch(
             batch_count += 1
 
             if step % 50 == 0:
-                print(f"Step {step}: Loss={loss.item():.4f}, Acc@1={acc.item():.3f}")
+                logger.info("Step %d: loss=%.4f, Acc@1=%.3f", step, loss.item(), acc.item())
 
         except Exception as e:
-            print(f"Error occurred: {e}. Skipping batch.")
+            logger.warning("Error in training loop: %s. Skipping batch.", e, exc_info=True)
             continue
+
+    if batch_count == 0:
+        logger.warning("No successful batches for epoch %d.", epoch + 1)
+        return 0.0, 0.0, step
 
     epoch_loss /= batch_count
     epoch_acc /= batch_count
@@ -166,6 +174,14 @@ def train_one_epoch(
 
 def main(cfg: TrainConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        )
+    logger.info("Training configuration: %s", cfg)
+    logger.info("Selected device: %s", device)
 
     # Initialize processor for image frames
     image_processor = AutoImageProcessor.from_pretrained(cfg.vit_name)
@@ -178,6 +194,8 @@ def main(cfg: TrainConfig):
         frames_per_sample=cfg.frames_per_sample,
         frame_sample_mode=cfg.frame_sample_mode,
     )
+    logger.info("Dataset loaded: %d items (frames_per_sample=%d, mode=%s).",
+                len(ds), cfg.frames_per_sample, cfg.frame_sample_mode)
     collate_fn = make_collate_fn(image_processor)
     dl = DataLoader(
         ds,
@@ -188,6 +206,10 @@ def main(cfg: TrainConfig):
         drop_last=True,
         pin_memory=True,
     )
+    try:
+        logger.info("DataLoader prepared: %d batches per epoch.", len(dl))
+    except TypeError:
+        logger.info("DataLoader prepared: batch size=%d (length unavailable).", cfg.batch_size)
 
     # Model
     mel_freq_bins = cfg.mel_freq_bins
@@ -196,6 +218,9 @@ def main(cfg: TrainConfig):
             raise ValueError("Dataset is empty; cannot infer mel frequency bins.")
         sample = ds[0]["mel"]
         mel_freq_bins = sample.size(1)
+        logger.info("Inferred mel frequency bins from dataset: %d", mel_freq_bins)
+    else:
+        logger.info("Using mel frequency bins from config: %d", mel_freq_bins)
 
     model = FacesMelDualEncoder(
         vit_name=cfg.vit_name,
@@ -204,6 +229,14 @@ def main(cfg: TrainConfig):
         freeze_backbones=cfg.freeze_backbones,
         average_frame_embeddings=True,
     ).to(device)
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    logger.info(
+        "Model initialised: %d trainable params / %d total params (freeze_backbones=%s).",
+        trainable_params,
+        total_params,
+        cfg.freeze_backbones,
+    )
 
     # Optimizer and Scheduler
     opt = torch.optim.AdamW(
@@ -217,6 +250,7 @@ def main(cfg: TrainConfig):
 
     save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Checkpoints will be saved to %s", save_dir.resolve())
 
     step = 0
     start_epoch = 0
@@ -233,15 +267,20 @@ def main(cfg: TrainConfig):
         scaler.load_state_dict(ckpt.get("scaler_state_dict", {}))
         start_epoch = ckpt.get("epoch", 0)
         step = ckpt.get("global_step", 0)
-        print(f"Resumed from checkpoint {resume_path} (epoch={start_epoch}, step={step})")
+        logger.info("Resumed from checkpoint %s (epoch=%d, step=%d)", resume_path, start_epoch, step)
 
     # Training loop
     for epoch in range(start_epoch, cfg.max_epochs):
-        print(f"Epoch {epoch + 1}/{cfg.max_epochs}")
+        logger.info("Epoch %d/%d", epoch + 1, cfg.max_epochs)
         epoch_loss, epoch_acc, step = train_one_epoch(
             model, dl, opt, scaler, sched, cfg, device, epoch, step
         )
-        print(f"Epoch {epoch + 1} Completed: Avg Loss={epoch_loss:.4f}, Avg Acc@1={epoch_acc:.3f}")
+        logger.info(
+            "Epoch %d completed. Avg Loss %.4f | Avg Acc@1 %.3f",
+            epoch + 1,
+            epoch_loss,
+            epoch_acc,
+        )
 
         save_epoch_checkpoint(
             save_dir=save_dir,
@@ -253,9 +292,11 @@ def main(cfg: TrainConfig):
             epoch=epoch + 1,
             global_step=step,
         )
+        logger.info("Checkpoint saved for epoch %d.", epoch + 1)
 
     # Save latest aliases
     shutil.copy2(save_dir / f"dual_encoder_full_epoch{cfg.max_epochs:03d}.pth", save_dir / "dual_encoder_full.pth")
+    logger.info("Updated latest checkpoint alias at %s", (save_dir / "dual_encoder_full.pth").resolve())
 
 
 if __name__ == "__main__":

@@ -184,7 +184,7 @@ def main(cfg: TrainConfig):
     logger.info("Selected device: %s", device)
 
     # Initialize processor for image frames
-    image_processor = AutoImageProcessor.from_pretrained(cfg.vit_name)
+    image_processor = AutoImageProcessor.from_pretrained(cfg.vit_name, use_fast=False)
 
     # Dataset and DataLoader
     ds = FacesMelDataset(
@@ -282,21 +282,12 @@ def main(cfg: TrainConfig):
             epoch_acc,
         )
 
-        save_epoch_checkpoint(
-            save_dir=save_dir,
-            model=model,
-            opt=opt,
-            sched=sched,
-            scaler=scaler,
-            cfg=cfg,
-            epoch=epoch + 1,
-            global_step=step,
-        )
-        logger.info("Checkpoint saved for epoch %d.", epoch + 1)
+        # No per-epoch checkpoint writing; rely on final state dict instead.
 
-    # Save latest aliases
-    shutil.copy2(save_dir / f"dual_encoder_full_epoch{cfg.max_epochs:03d}.pth", save_dir / "dual_encoder_full.pth")
-    logger.info("Updated latest checkpoint alias at %s", (save_dir / "dual_encoder_full.pth").resolve())
+    # Save final model parameters for convenience
+    final_path = save_dir / "faces_mel_final.pth"
+    torch.save(model.state_dict(), final_path)
+    logger.info("Saved final model parameters to %s", final_path.resolve())
 
 
 if __name__ == "__main__":

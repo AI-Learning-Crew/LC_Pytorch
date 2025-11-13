@@ -211,7 +211,10 @@ def evaluate(cfg: EvalConfig) -> None:
     logger.info("Using device: %s", device)
 
     # Dataset & loader ------------------------------------------------------
-    image_processor = AutoImageProcessor.from_pretrained(cfg.vit_name or "facebook/timesformer-base-finetuned-k400")
+    image_processor = AutoImageProcessor.from_pretrained(
+        cfg.vit_name or "facebook/timesformer-base-finetuned-k400",
+        use_fast=False,
+    )
     dataset = FacesMelDataset(
         meta_path=cfg.meta_path,
         root_dir=cfg.root_dir,
